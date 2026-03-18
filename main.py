@@ -1,167 +1,147 @@
 """
-SUPERCAPFREEZER Main Application
-================================
+Simple headless Pi app for SUPERCAPFREEZER.
 
-Integrates:
-- ASCII protocol for dual serial (Peltier + Measurement controllers)
-- Data logger to CSV (data_logger.py)
-- Pygame UI with multiple screens (ui_app.py)
-
-Usage:
-    python main.py --port1 /dev/ttyACM0 --port2 /dev/ttyACM1 [--fullscreen]
-    python main.py --simulate  # Simulation mode (no hardware needed)
+Behavior:
+- Connect to Arduino serial.
+- Send setpoint: SET:<value>
+- Send measured temp from Pi: TEMP:<value>
+- Read Arduino status: TEMP:<value> PWM:<value>
+- Log status to CSV.
 """
 
-import sys
+from __future__ import annotations
+
 import argparse
-import os
-import time
+import math
 import threading
+import time
 
-from serial_handler import PeltierController, MeasurementController
-from data_logger import DataLogger
-from ui_app import PyGameApp
 from config_loader import load_config
+from data_logger import DataLogger
+from serial_handler import ArduinoPeltier
 
-# Global instances
+
 g_logger = None
-g_peltier = None
-g_measurement = None
-g_setpoint = 25.0  # Default temperature setpoint
+g_setpoint = 25.0
+g_last_pi_temp = None
 
 
-def on_temperature_packet(packet: dict):
-    """
-    Callback when temperature data is received from Peltier controller.
-    Expected format: {'TEMP': 23.45, 'PWM': 128}
-    """
-    global g_logger, g_setpoint
-    
-    if 'TEMP' in packet and 'PWM' in packet:
-        temp = packet['TEMP']
-        pwm = int(packet['PWM'])
-        
-        # Log to CSV
-        if g_logger:
-            g_logger.push_temperature(temp, pwm, g_setpoint)
+def on_arduino_status(packet: dict) -> None:
+    """Log Arduino status packets."""
+    global g_logger, g_setpoint, g_last_pi_temp
 
+    temp = packet.get("TEMP")
+    pwm = packet.get("PWM")
 
-def on_measurement_packet(packet: dict):
-    """
-    Callback when measurement data is received from measurement controller.
-    Expected format: {'MEAS': None, 'V1': 12.34, 'V2': 5.67, 'I1': 0.123, 'I2': 0.456, 'STATE': 'CHARGE'}
-    """
-    global g_logger
-    
-    if 'V1' in packet and 'I1' in packet:
-        v1 = packet.get('V1', 0.0)
-        v2 = packet.get('V2', 0.0)
-        i1 = packet.get('I1', 0.0)
-        i2 = packet.get('I2', 0.0)
-        state = packet.get('STATE', 'IDLE')
-        
-        # Log to CSV
-        if g_logger:
-            g_logger.push_measurement(v1, v2, i1, i2, state)
+    if temp is None or pwm is None:
+        return
 
+    if g_logger:
+        g_logger.push_temperature(float(temp), int(pwm), g_setpoint)
 
-def main():
-    global g_logger, g_peltier, g_measurement, g_setpoint
-    
-    parser = argparse.ArgumentParser(
-        description="SUPERCAPFREEZER: Dual microcontroller controller for Raspberry Pi"
+    # Live CLI output so current values are visible while running.
+    pi_temp_text = f"{g_last_pi_temp:.2f}" if g_last_pi_temp is not None else "--"
+    print(
+        f"[LIVE] PI_TEMP:{pi_temp_text}C "
+        f"ARD_TEMP:{float(temp):.2f}C PWM:{int(pwm):3d} SET:{g_setpoint:.2f}C"
     )
-    parser.add_argument('--port1', help='Peltier controller port (e.g., /dev/ttyACM0)', default=None)
-    parser.add_argument('--port2', help='Measurement controller port (e.g., /dev/ttyACM1)', default=None)
-    parser.add_argument('--baud', type=int, default=None, help='Baud rate')
-    parser.add_argument('--fullscreen', action='store_true', help='Fullscreen mode')
-    parser.add_argument('--simulate', action='store_true', help='Simulate data (no hardware)')
-    parser.add_argument('--config', default='config.yaml', help='Path to config.yaml')
-    
+
+
+def make_pi_temperature_source(simulate: bool, base_temp: float):
+    """Return a function that gives the current Pi temperature input value."""
+    if not simulate:
+        return lambda now: base_temp
+
+    # Simulation: simple sine around base_temp.
+    return lambda now: base_temp + 2.0 * math.sin(now * 0.2)
+
+
+def main() -> None:
+    global g_logger, g_setpoint, g_last_pi_temp
+
+    parser = argparse.ArgumentParser(description="SUPERCAPFREEZER simple ASCII Pi controller")
+
+    # Keep both names so existing service files continue to work.
+    parser.add_argument("--port", "--port1", dest="port", default=None, help="Arduino serial port")
+    parser.add_argument("--baud", type=int, default=None, help="Serial baud")
+    parser.add_argument("--simulate", action="store_true", help="Simulate temperature input")
+    parser.add_argument("--config", default="config.yaml", help="Path to config.yaml")
+
+    # Simple runtime knobs.
+    parser.add_argument("--setpoint", type=float, default=None, help="Setpoint sent to Arduino")
+    parser.add_argument("--pi-temp", type=float, default=None, help="Fixed Pi temperature to send")
+    parser.add_argument("--temp-rate", type=float, default=10.0, help="Pi TEMP send rate in Hz")
+
+    # Keep old arg accepted for compatibility; it is not used.
+    parser.add_argument("--port2", default=None, help=argparse.SUPPRESS)
+
     args = parser.parse_args()
-    
-    # Load configuration and merge CLI overrides
+
     cfg = load_config(args.config)
-    baud = args.baud if args.baud else int(cfg["serial"]["baud"])
-    port1 = args.port1 if args.port1 else cfg["serial"].get("port")
-    port2 = args.port2 if args.port2 else cfg.get("measurement", {}).get("port")
-    fullscreen = bool(args.fullscreen or cfg["display"].get("fullscreen", False))
-    g_setpoint = float(cfg.get("control", {}).get("default_setpoint", 25.0))
+
+    baud = args.baud if args.baud is not None else int(cfg.get("serial", {}).get("baud", 115200))
+    port = args.port if args.port else cfg.get("serial", {}).get("port")
+    g_setpoint = args.setpoint if args.setpoint is not None else float(cfg.get("control", {}).get("default_setpoint", 25.0))
+
+    pi_temp_base = args.pi_temp if args.pi_temp is not None else g_setpoint
+    temp_rate_hz = max(1.0, float(args.temp_rate))
+    temp_period = 1.0 / temp_rate_hz
+
+    log_dir = cfg.get("logging", {}).get("directory", "./logs")
+    max_hours = int(cfg.get("logging", {}).get("retention_hours", 24))
+    flush_interval = float(cfg.get("logging", {}).get("flush_interval_s", 1.0))
 
     print("=" * 60)
-    print("SUPERCAPFREEZER - Dual Controller System")
+    print("SUPERCAPFREEZER - Simple ASCII Controller")
     print("=" * 60)
-    print(f"Peltier Port: {port1 if port1 else ('<auto>' if not args.simulate else 'Simulation')}")
-    print(f"Measurement Port: {port2 if port2 else ('<auto>' if not args.simulate else 'Simulation')}")
+    print(f"Port: {port if port else ('<auto>' if not args.simulate else 'Simulation')}")
     print(f"Baud: {baud}")
-    print(f"Setpoint: {g_setpoint}°C")
+    print(f"Setpoint: {g_setpoint:.2f} C")
+    print(f"Pi temp source: {'simulated' if args.simulate else 'fixed'}")
     print("=" * 60)
-    
-    # Initialize logger
-    log_dir = cfg["logging"].get("directory", "./logs")
-    max_hours = int(cfg["logging"].get("retention_hours", 24))
+
     g_logger = DataLogger(log_dir=log_dir, max_hours=max_hours)
-    
-    # Initialize Peltier controller
-    g_peltier = PeltierController(
-        port=port1,
+
+    arduino = ArduinoPeltier(
+        port=port,
         baud=baud,
-        callback=on_temperature_packet,
-        simulate=args.simulate
+        on_status=on_arduino_status,
+        simulate=args.simulate,
     )
-    g_peltier.start()
-    
-    # Initialize Measurement controller
-    g_measurement = MeasurementController(
-        port=port2,
-        baud=baud,
-        callback=on_measurement_packet,
-        simulate=args.simulate
-    )
-    g_measurement.start()
-    
-    # Set initial temperature setpoint
-    time.sleep(1)  # Wait for connection
-    g_peltier.set_temperature(g_setpoint)
-    
-    # Start CSV flusher thread (write to disk every second)
-    def csv_flusher():
+    arduino.start()
+
+    # Give serial a moment to come up, then send setpoint once.
+    time.sleep(1.0)
+    arduino.send_setpoint(g_setpoint)
+
+    def flush_loop() -> None:
         while True:
             if g_logger:
                 g_logger.flush_to_csv()
-            time.sleep(1)
-    
-    flush_thread = threading.Thread(target=csv_flusher, daemon=True)
-    flush_thread.start()
-    
-    # Initialize UI
-    ui_app = PyGameApp(port=port1, baud=baud, fullscreen=fullscreen)
-    ui_app.set_peltier(g_peltier)
-    ui_app.set_measurement(g_measurement)
-    ui_app.set_logger(g_logger)
-    
+            time.sleep(flush_interval)
+
+    threading.Thread(target=flush_loop, daemon=True).start()
+
+    pi_temp_fn = make_pi_temperature_source(args.simulate, pi_temp_base)
+
+    print("[MAIN] Running. Press Ctrl+C to stop.")
+
     try:
-        # Run UI
-        ui_app.run()
+        while True:
+            now = time.time()
+            measured_temp = pi_temp_fn(now)
+            g_last_pi_temp = measured_temp
+            arduino.send_measured_temp(measured_temp)
+            time.sleep(temp_period)
     except KeyboardInterrupt:
         print("\n[MAIN] Interrupted by user")
-    except Exception as e:
-        print(f"[MAIN ERROR] {e}")
-        import traceback
-        traceback.print_exc()
     finally:
-        # Cleanup
         print("[MAIN] Shutting down...")
-        g_peltier.stop()
-        g_measurement.stop()
-        g_logger.close()
+        arduino.stop()
+        if g_logger:
+            g_logger.close()
         print("[MAIN] Goodbye!")
-        reader.stop()
-        g_logger.close()
-        ui_app.stop()
-        print("[MAIN] Done")
 
 
-if __name__ == '__main__':
-    g_logger = None
+if __name__ == "__main__":
     main()
