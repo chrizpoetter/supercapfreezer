@@ -38,7 +38,7 @@
 #define TEMP_TIMEOUT_MS    2000           // Disable output if Pi temp updates stop
 
 // Serial
-#define SERIAL_BAUD        115200
+#define SERIAL_BAUD        9600
 
 // ===== CONTROL PARAMETERS =====
 
