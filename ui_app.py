@@ -46,11 +46,15 @@ class DashboardScreen(UIScreen):
         surface.fill((10, 10, 10))
         
         # Get latest data
-        if self.app.logger.buffer:
-            latest = self.app.logger.buffer[-1]
+        if self.app.logger.temp_buffer:
+            latest = self.app.logger.temp_buffer[-1]
             temp = latest['temperature']
+            pwm = latest.get('pwm', 0)
+            setpoint = latest.get('setpoint', 25.0)
         else:
             temp = 0.0
+            pwm = 0
+            setpoint = 25.0
         
         stats = self.app.logger.get_stats()
         
@@ -60,10 +64,17 @@ class DashboardScreen(UIScreen):
         
         # Current temperature (large)
         temp_text = self.font_large.render(f"{temp:.2f}°C", True, (100, 255, 100))
-        surface.blit(temp_text, (40, 100))
+        surface.blit(temp_text, (40, 80))
+        
+        # Setpoint and PWM
+        setpoint_text = self.font_medium.render(f"Target: {setpoint:.1f}°C", True, (150, 150, 255))
+        surface.blit(setpoint_text, (40, 140))
+        
+        pwm_text = self.font_medium.render(f"PWM: {pwm} ({pwm*100//255}%)", True, (255, 200, 100))
+        surface.blit(pwm_text, (40, 170))
         
         # Stats
-        y = 200
+        y = 210
         lines = [
             f"Samples: {stats['count']}",
             f"Min: {stats['min_temp']:.2f}°C" if stats['min_temp'] is not None else "Min: --",
@@ -78,11 +89,14 @@ class DashboardScreen(UIScreen):
             y += 40
         
         # Parse stats
-        parser_stats = self.app.reader.get_stats()
+        if self.app.peltier:
+            parser_stats = self.app.peltier.get_stats()
+        else:
+            parser_stats = {'valid_lines': 0, 'parse_errors': 0}
         y += 20
         parser_lines = [
-            f"Packets: {parser_stats['valid_packets']}",
-            f"CRC Errors: {parser_stats['crc_errors']}",
+            f"Peltier: {parser_stats.get('valid_lines', 0)} pkts",
+            f"Errors: {parser_stats.get('parse_errors', 0)}",
         ]
         
         for line in parser_lines:
@@ -232,6 +246,179 @@ class SettingsScreen(UIScreen):
                 print(f"[UI] Export failed: {e}")
 
 
+class ControlScreen(UIScreen):
+    """Control screen: Adjust temperature setpoint"""
+    
+    def __init__(self, app):
+        super().__init__(app, "Control")
+        self.font_large = pygame.font.SysFont(None, 42, bold=True)
+        self.font_medium = pygame.font.SysFont(None, 28)
+        self.font_small = pygame.font.SysFont(None, 20)
+        self._btn_up = None
+        self._btn_down = None
+    
+    def draw(self, surface):
+        surface.fill((10, 10, 10))
+        
+        # Title
+        title = self.font_large.render("Temperature Control", True, (0, 200, 50))
+        surface.blit(title, (20, 10))
+        
+        # Get current setpoint
+        if self.app.logger.temp_buffer:
+            setpoint = self.app.logger.temp_buffer[-1].get('setpoint', 25.0)
+            current_temp = self.app.logger.temp_buffer[-1].get('temperature', 0.0)
+        else:
+            setpoint = 25.0
+            current_temp = 0.0
+        
+        # Current temperature
+        temp_text = self.font_medium.render(f"Current: {current_temp:.2f}°C", True, (200, 200, 200))
+        surface.blit(temp_text, (40, 70))
+        
+        # Setpoint (large)
+        setpoint_text = self.font_large.render(f"Target: {setpoint:.1f}°C", True, (100, 255, 100))
+        surface.blit(setpoint_text, (40, 120))
+        
+        # Buttons for adjustment
+        btn_width = 100
+        btn_height = 60
+        center_x = surface.get_width() // 2
+        
+        # Down button
+        self._btn_down = pygame.Rect(center_x - btn_width - 20, 200, btn_width, btn_height)
+        pygame.draw.rect(surface, (100, 50, 50), self._btn_down)
+        pygame.draw.rect(surface, (150, 100, 100), self._btn_down, 2)
+        down_text = self.font_large.render("-", True, (255, 255, 255))
+        surface.blit(down_text, (self._btn_down.centerx - 10, self._btn_down.centery - 20))
+        
+        # Up button
+        self._btn_up = pygame.Rect(center_x + 20, 200, btn_width, btn_height)
+        pygame.draw.rect(surface, (50, 100, 50), self._btn_up)
+        pygame.draw.rect(surface, (100, 150, 100), self._btn_up, 2)
+        up_text = self.font_large.render("+", True, (255, 255, 255))
+        surface.blit(up_text, (self._btn_up.centerx - 10, self._btn_up.centery - 20))
+        
+        # Instructions
+        inst = self.font_small.render("Tap +/- to adjust setpoint by 0.5°C", True, (150, 150, 150))
+        surface.blit(inst, (40, 290))
+    
+    def on_touch(self, x: int, y: int):
+        if self._btn_up and self._btn_up.collidepoint(x, y):
+            # Increase setpoint
+            if self.app.peltier and self.app.logger.temp_buffer:
+                current_setpoint = self.app.logger.temp_buffer[-1].get('setpoint', 25.0)
+                new_setpoint = min(current_setpoint + 0.5, 40.0)  # Max 40°C
+                self.app.peltier.set_temperature(new_setpoint)
+                import main
+                main.g_setpoint = new_setpoint
+                print(f"[UI] Setpoint increased to {new_setpoint:.1f}°C")
+        
+        elif self._btn_down and self._btn_down.collidepoint(x, y):
+            # Decrease setpoint
+            if self.app.peltier and self.app.logger.temp_buffer:
+                current_setpoint = self.app.logger.temp_buffer[-1].get('setpoint', 25.0)
+                new_setpoint = max(current_setpoint - 0.5, -10.0)  # Min -10°C
+                self.app.peltier.set_temperature(new_setpoint)
+                import main
+                main.g_setpoint = new_setpoint
+                print(f"[UI] Setpoint decreased to {new_setpoint:.1f}°C")
+
+
+class MeasurementScreen(UIScreen):
+    """Measurement screen: Display voltage/current and state"""
+    
+    def __init__(self, app):
+        super().__init__(app, "Measurement")
+        self.font_large = pygame.font.SysFont(None, 42, bold=True)
+        self.font_medium = pygame.font.SysFont(None, 26)
+        self.font_small = pygame.font.SysFont(None, 18)
+        self._btn_start = None
+        self._btn_stop = None
+        self._btn_reset = None
+    
+    def draw(self, surface):
+        surface.fill((10, 10, 10))
+        
+        # Title
+        title = self.font_large.render("Measurement", True, (0, 200, 50))
+        surface.blit(title, (20, 10))
+        
+        # Get latest measurement data
+        if self.app.logger.meas_buffer:
+            latest = self.app.logger.meas_buffer[-1]
+            v1 = latest.get('v1', 0.0)
+            v2 = latest.get('v2', 0.0)
+            i1 = latest.get('i1', 0.0)
+            i2 = latest.get('i2', 0.0)
+            state = latest.get('state', 'IDLE')
+        else:
+            v1, v2, i1, i2 = 0.0, 0.0, 0.0, 0.0
+            state = 'IDLE'
+        
+        # State indicator
+        state_color = {
+            'IDLE': (200, 200, 200),
+            'CHARGE': (100, 255, 100),
+            'DISCHARGE': (255, 100, 100)
+        }.get(state, (200, 200, 200))
+        
+        state_text = self.font_large.render(f"State: {state}", True, state_color)
+        surface.blit(state_text, (40, 60))
+        
+        # Measurements
+        y = 120
+        lines = [
+            f"V1: {v1:.3f} V",
+            f"V2: {v2:.3f} V",
+            f"I1: {i1:.3f} A",
+            f"I2: {i2:.3f} A",
+        ]
+        
+        for line in lines:
+            surf = self.font_medium.render(line, True, (200, 200, 200))
+            surface.blit(surf, (40, y))
+            y += 35
+        
+        # Control buttons
+        btn_w, btn_h = 90, 45
+        y_btn = surface.get_height() - 80
+        
+        # Start button
+        self._btn_start = pygame.Rect(20, y_btn, btn_w, btn_h)
+        pygame.draw.rect(surface, (50, 100, 50), self._btn_start)
+        start_text = self.font_small.render("START", True, (255, 255, 255))
+        surface.blit(start_text, (self._btn_start.centerx - 25, self._btn_start.centery - 8))
+        
+        # Stop button
+        self._btn_stop = pygame.Rect(125, y_btn, btn_w, btn_h)
+        pygame.draw.rect(surface, (100, 50, 50), self._btn_stop)
+        stop_text = self.font_small.render("STOP", True, (255, 255, 255))
+        surface.blit(stop_text, (self._btn_stop.centerx - 22, self._btn_stop.centery - 8))
+        
+        # Reset button
+        self._btn_reset = pygame.Rect(230, y_btn, btn_w, btn_h)
+        pygame.draw.rect(surface, (50, 50, 100), self._btn_reset)
+        reset_text = self.font_small.render("RESET", True, (255, 255, 255))
+        surface.blit(reset_text, (self._btn_reset.centerx - 25, self._btn_reset.centery - 8))
+    
+    def on_touch(self, x: int, y: int):
+        if self._btn_start and self._btn_start.collidepoint(x, y):
+            if self.app.measurement:
+                self.app.measurement.start_measurement()
+                print("[UI] Measurement started")
+        
+        elif self._btn_stop and self._btn_stop.collidepoint(x, y):
+            if self.app.measurement:
+                self.app.measurement.stop_measurement()
+                print("[UI] Measurement stopped")
+        
+        elif self._btn_reset and self._btn_reset.collidepoint(x, y):
+            if self.app.measurement:
+                self.app.measurement.reset()
+                print("[UI] Measurement reset")
+
+
 class PyGameApp:
     """Main Pygame application"""
     
@@ -257,22 +444,29 @@ class PyGameApp:
         self.screens = []
         self.current_screen_idx = 0
         
-        # Serial reader and logger
-        self.reader = None
+        # Controllers and logger
+        self.peltier = None
+        self.measurement = None
         self.logger = None
     
-    def set_reader(self, reader):
-        """Set serial reader instance"""
-        self.reader = reader
+    def set_peltier(self, peltier):
+        """Set Peltier controller instance."""
+        self.peltier = peltier
+    
+    def set_measurement(self, measurement):
+        """Set Measurement controller instance."""
+        self.measurement = measurement
     
     def set_logger(self, logger):
-        """Set data logger instance"""
+        """Set data logger instance."""
         self.logger = logger
         
         # Initialize screens
         self.screens = [
             DashboardScreen(self),
             GraphScreen(self),
+            ControlScreen(self),
+            MeasurementScreen(self),
             SettingsScreen(self),
         ]
     
@@ -333,21 +527,18 @@ class PyGameApp:
         self.current_screen_idx = (self.current_screen_idx - 1) % len(self.screens)
     
     def _save_csv(self):
-        """Save current data to CSV"""
+        """Save current data to CSV."""
         filename = f"export_{int(time.time())}.csv"
         try:
             import csv
             data = self.logger.get_all()
             with open(filename, 'w', newline='') as f:
-                writer = csv.DictWriter(f, fieldnames=['timestamp', 'temperature', 'seq_num'])
-                writer.writeheader()
-                for record in data:
-                    writer.writerow({
-                        'timestamp': record['timestamp'],
-                        'temperature': record['temperature'],
-                        'seq_num': record['seq_num']
-                    })
-            print(f"[APP] Exported {len(data)} records to {filename}")
+                if data:
+                    fieldnames = list(data[0].keys())
+                    writer = csv.DictWriter(f, fieldnames=fieldnames)
+                    writer.writeheader()
+                    writer.writerows(data)
+            print(f"[APP] Exported {len(data)} temperature records to {filename}")
         except Exception as e:
             print(f"[APP ERROR] Export failed: {e}")
     

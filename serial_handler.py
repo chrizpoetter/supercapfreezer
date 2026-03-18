@@ -1,153 +1,105 @@
 """
-SUPERCAPFREEZER Binary Protocol Parser
-======================================
+SUPERCAPFREEZER Dual Serial Handler
+====================================
 
-Parses binary packets from Arduino and validates them using CRC16-CCITT.
-Converts payload to temperature/voltage values.
-Handles synchronization and error recovery.
+Handles ASCII protocol communication with two microcontrollers:
+1. Arduino (Peltier Controller) - Temperature control
+2. Measurement MCU - Voltage/Current measurement with state machine
+
+Simple ASCII line-based protocol for both devices.
 """
 
-import struct
-from collections import deque
-from typing import Optional, Tuple, List
+import threading
+import time
+from typing import Optional, Callable, Dict
 
 
-class ProtocolError(Exception):
-    """Protocol-related exceptions"""
-    pass
-
-
-class PacketParser:
+class ASCIILineParser:
     """
-    Stateful parser for binary protocol packets.
+    Simple ASCII line parser for both microcontrollers.
     
-    Implements:
-    - Byte-by-byte synchronization (looking for 0xAA 0x55)
-    - Frame size validation
-    - CRC16-CCITT checksum verification
-    - Payload decoding
+    Handles:
+    - Arduino: "TEMP:23.45 PWM:128"
+    - Measurement: "MEAS:V1:12.34 V2:5.67 I1:0.123 I2:0.456 STATE:CHARGE"
+    - Comments: "# Message"
     """
-    
-    # Protocol constants
-    SYNC_0 = 0xAA
-    SYNC_1 = 0x55
-    TYPE_TEMP = 0x01
-    TYPE_VOLT = 0x02
-    HEADER_SIZE = 10  # SYNC(2) + TYPE(1) + SAMPLES(1) + TIMESTAMP(4) + SEQ(2)
-    CRC_SIZE = 2
-    SAMPLE_SIZE = 2
-    
-    # State machine
-    STATE_SYNC_0 = 0
-    STATE_SYNC_1 = 1
-    STATE_HEADER = 2
-    STATE_PAYLOAD = 3
-    STATE_CRC = 4
     
     def __init__(self):
-        self.state = self.STATE_SYNC_0
-        self.buffer = bytearray()
-        self.frame_size = 0
-        self.samples_count = 0
+        self.line_buffer = ""
         self.stats = {
-            'total_packets': 0,
-            'valid_packets': 0,
-            'crc_errors': 0,
-            'sync_errors': 0,
-            'frame_errors': 0,
+            'total_lines': 0,
+            'valid_lines': 0,
+            'parse_errors': 0,
+            'comment_lines': 0,
         }
     
-    def push_byte(self, byte: int) -> Optional[dict]:
+    def push_data(self, data: str) -> list:
         """
-        Push one byte to the parser.
-        
-        Args:
-            byte: Single byte (0-255)
-            
-        Returns:
-            Parsed packet dict if complete, else None
-            
-        Raises:
-            ProtocolError: If irrecoverable error
+        Push incoming data (can be partial lines).
+        Returns list of parsed packets (one per complete line).
         """
-        byte = byte & 0xFF
+        packets = []
+        self.line_buffer += data
         
-        if self.state == self.STATE_SYNC_0:
-            if byte == self.SYNC_0:
-                self.buffer = bytearray([byte])
-                self.state = self.STATE_SYNC_1
-            else:
-                self.stats['sync_errors'] += 1
-        
-        elif self.state == self.STATE_SYNC_1:
-            if byte == self.SYNC_1:
-                self.buffer.append(byte)
-                self.state = self.STATE_HEADER
-            else:
-                self.stats['sync_errors'] += 1
-                self.state = self.STATE_SYNC_0
-        
-        elif self.state == self.STATE_HEADER:
-            self.buffer.append(byte)
-            if len(self.buffer) == self.HEADER_SIZE:
-                # Parse header
-                frame_type = self.buffer[2]
-                self.samples_count = self.buffer[3]
-                
-                if self.samples_count == 0 or self.samples_count > 255:
-                    self.stats['frame_errors'] += 1
-                    self.state = self.STATE_SYNC_0
-                    self.buffer.clear()
-                    return None
-                
-                self.frame_size = (self.HEADER_SIZE + 
-                                  self.samples_count * self.SAMPLE_SIZE + 
-                                  self.CRC_SIZE)
-                
-                self.state = self.STATE_PAYLOAD
-        
-        elif self.state == self.STATE_PAYLOAD:
-            self.buffer.append(byte)
-            payload_start = self.HEADER_SIZE
-            payload_end = payload_start + self.samples_count * self.SAMPLE_SIZE
+        # Process complete lines
+        while '\n' in self.line_buffer:
+            line, self.line_buffer = self.line_buffer.split('\n', 1)
+            line = line.strip()
             
-            if len(self.buffer) >= payload_end:
-                self.state = self.STATE_CRC
-        
-        elif self.state == self.STATE_CRC:
-            self.buffer.append(byte)
-            
-            if len(self.buffer) == self.frame_size:
-                # Complete frame received
-                packet = self._validate_and_parse()
-                self.stats['total_packets'] += 1
-                
+            if line:
+                packet = self._parse_line(line)
                 if packet:
-                    self.stats['valid_packets'] += 1
-                else:
-                    self.stats['crc_errors'] += 1
-                
-                # Reset state machine
-                self.state = self.STATE_SYNC_0
-                self.buffer.clear()
-                
-                return packet
+                    packets.append(packet)
+        
+        return packets
+    
+    def _parse_line(self, line: str) -> Optional[dict]:
+        """Parse a single line into a packet dict."""
+        self.stats['total_lines'] += 1
+        
+        # Skip comments
+        if line.startswith('#'):
+            self.stats['comment_lines'] += 1
+            return None
+        
+        try:
+            # Parse key:value pairs
+            parts = line.split()
+            data = {}
+            
+            for part in parts:
+                if ':' in part:
+                    key, value = part.split(':', 1)
+                    # Try to convert to float, otherwise keep as string
+                    try:
+                        data[key] = float(value)
+                    except ValueError:
+                        data[key] = value
+            
+            if data:
+                self.stats['valid_lines'] += 1
+                return data
+            
+        except Exception:
+            self.stats['parse_errors'] += 1
         
         return None
     
-    def _validate_and_parse(self) -> Optional[dict]:
-        """
-        Validate packet (CRC) and extract data.
-        
-        Returns:
-            Packet dict with decoded values, or None if CRC fails
-        """
-        # Extract CRC from packet
-        crc_offset = len(self.buffer) - self.CRC_SIZE
-        packet_crc = struct.unpack_from('<H', self.buffer, crc_offset)[0]
-        
-        # Calculate CRC over header + payload (excluding CRC field)
-        calculated_crc = self._crc16_ccitt(self.buffer[:crc_offset])
+    def get_stats(self) -> dict:
+        """Return parsing statistics."""
+        return self.stats.copy()
+    
+    def reset_stats(self):
+        """Reset statistics counters."""
+        self.stats = {
+            'total_lines': 0,
+            'valid_lines': 0,
+            'parse_errors': 0,
+            'comment_lines': 0,
+        }
+
+
+class SerialDevice:
         
         if packet_crc != calculated_crc:
             return None
@@ -185,57 +137,31 @@ class PacketParser:
         Init: 0xFFFF
         """
         crc = 0xFFFF
-        
-        for byte in data:
-            crc ^= byte << 8
-            for _ in range(8):
-                crc = crc << 1
-                if crc & 0x10000:
-                    crc = (crc ^ 0x1021) & 0xFFFF
-        
-        return crc
-    
-    def get_stats(self) -> dict:
-        """Return parser statistics"""
-        return self.stats.copy()
-    
-    def reset_stats(self):
-        """Reset statistics counters"""
-        self.stats = {
-            'total_packets': 0,
-            'valid_packets': 0,
-            'crc_errors': 0,
-            'sync_errors': 0,
-            'frame_errors': 0,
-        }
-
-
-class SerialReaderThread:
+class SerialDevice:
     """
-    Reads from serial port in separate thread.
-    Feeds bytes to PacketParser.
-    Calls callback for each complete packet.
+    Handles serial communication with one microcontroller.
+    Threaded reader with ASCII line parsing.
     """
     
-    def __init__(self, port: str, baud: int = 115200, callback=None, simulate=False):
-        import threading
-        import time
-        
+    def __init__(self, name: str, port: Optional[str], baud: int = 115200, 
+                 callback: Optional[Callable] = None, simulate: bool = False):
+        self.name = name
         self.port = port
         self.baud = baud
         self.callback = callback
         self.simulate = simulate
         self._stop = threading.Event()
-        self.parser = PacketParser()
+        self.parser = ASCIILineParser()
         self.thread = threading.Thread(target=self._run, daemon=True)
         self.ser = None
+        self.connected = False
     
     def start(self):
-        """Start reader thread"""
+        """Start reader thread."""
         self.thread.start()
     
     def stop(self):
-        """Stop reader thread"""
+        """Stop reader thread."""
         self._stop.set()
         if self.ser:
             try:
@@ -243,92 +169,182 @@ class SerialReaderThread:
             except:
                 pass
     
+    def send(self, command: str):
+        """Send command to device (adds newline)."""
+        if self.ser and self.ser.is_open:
+            try:
+                self.ser.write(f"{command}\n".encode('utf-8'))
+                self.ser.flush()
+            except Exception as e:
+                print(f"[{self.name}] Send error: {e}")
+    
     def _run(self):
-        import time
-        
+        """Main thread loop."""
         if self.simulate:
             self._simulate_data()
             return
-
+        
         # Auto-detect port if not provided
         port = self.port or self._auto_detect_port()
         if not port:
-            print("[Serial] No port found. Falling back to simulation.")
+            print(f"[{self.name}] No port found. Simulation mode.")
             self._simulate_data()
             return
-
+        
         try:
             import serial
-            self.ser = serial.Serial(port, self.baud, timeout=1)
+            self.ser = serial.Serial(port, self.baud, timeout=0.1)
+            self.connected = True
+            print(f"[{self.name}] Connected to {port} @ {self.baud} baud")
             
             while not self._stop.is_set():
                 if self.ser.in_waiting > 0:
-                    byte = self.ser.read(1)[0]
-                    packet = self.parser.push_byte(byte)
+                    # Read available data
+                    data = self.ser.read(self.ser.in_waiting).decode('utf-8', errors='ignore')
+                    packets = self.parser.push_data(data)
                     
-                    if packet and self.callback:
-                        self.callback(packet)
+                    # Call callback for each packet
+                    if self.callback:
+                        for packet in packets:
+                            self.callback(packet)
                 else:
                     time.sleep(0.01)
         
         except Exception as e:
-            print(f"Serial error: {e}")
+            print(f"[{self.name}] Serial error: {e}")
+            self.connected = False
             self._simulate_data()
-
+    
     @staticmethod
-    def _auto_detect_port() -> str | None:
-        """Try to detect Arduino UNO R4 port automatically.
-
-        Preference order:
-        - Ports whose description contains 'Arduino' or 'R4'
-        - First /dev/ttyACM* or /dev/ttyUSB*
-        """
+    def _auto_detect_port() -> Optional[str]:
+        """Try to detect Arduino/MCU port automatically."""
         try:
-            from serial.tools import list_ports  # type: ignore
-        except Exception:
+            from serial.tools import list_ports
+        except:
             return None
+        
         ports = list(list_ports.comports())
         if not ports:
             return None
+        
         # Prefer Arduino-like descriptions
         for p in ports:
             desc = (p.description or "").lower()
             if "arduino" in desc or "r4" in desc or "uno" in desc:
                 return p.device
+        
         # Fallback: first ACM/USB
         for p in ports:
             if p.device.startswith("/dev/ttyACM") or p.device.startswith("/dev/ttyUSB"):
                 return p.device
-        # Otherwise first available
-        return ports[0].device
+        
+        return ports[0].device if ports else None
     
     def _simulate_data(self):
-        """Simulate temperature data for testing"""
-        import time
-        import numpy as np
-        
-        t = 0.0
-        seq = 0
-        
-        while not self._stop.is_set():
-            # Simulate temperature: 25°C ± 3°C with small noise
-            temp = 25.0 + 3.0 * np.sin(t) + (np.random.rand() - 0.5) * 0.3
-            
-            packet = {
-                'type': self.parser.TYPE_TEMP,
-                'timestamp_ms': int(time.time() * 1000),
-                'seq_num': seq,
-                'samples': [temp],
-                'values': temp,
-            }
-            
-            if self.callback:
-                self.callback(packet)
-            
-            seq += 1
-            t += 0.1
-            time.sleep(0.1)
+        """Simulate data for testing."""
+        pass  # Overridden by subclasses
     
     def get_stats(self) -> dict:
-        """Return parser statistics"""
+        """Return parser statistics."""
         return self.parser.get_stats()
+    
+    def is_connected(self) -> bool:
+        """Check if device is connected."""
+        return self.connected
+
+
+class PeltierController(SerialDevice):
+    """Arduino Peltier temperature controller."""
+    
+    def __init__(self, port: Optional[str], baud: int = 115200, 
+                 callback: Optional[Callable] = None, simulate: bool = False):
+        super().__init__("Peltier", port, baud, callback, simulate)
+    
+    def set_temperature(self, temp: float):
+        """Send temperature setpoint to Arduino."""
+        self.send(f"SET:{temp:.2f}")
+    
+    def _simulate_data(self):
+        """Simulate temperature data."""
+        import numpy as np
+        t = 0.0
+        
+        while not self._stop.is_set():
+            temp = 25.0 + 3.0 * np.sin(t) + (np.random.rand() - 0.5) * 0.3
+            pwm = int(128 + 50 * np.sin(t * 0.5))
+            
+            line = f"TEMP:{temp:.2f} PWM:{pwm}\n"
+            packets = self.parser.push_data(line)
+            
+            if self.callback:
+                for packet in packets:
+                    self.callback(packet)
+            
+            t += 0.1
+            time.sleep(0.1)
+
+
+class MeasurementController(SerialDevice):
+    """Second microcontroller for voltage/current measurements."""
+    
+    def __init__(self, port: Optional[str], baud: int = 115200, 
+                 callback: Optional[Callable] = None, simulate: bool = False):
+        super().__init__("Measurement", port, baud, callback, simulate)
+        self.state = "IDLE"
+    
+    def start_measurement(self):
+        """Start measurement sequence."""
+        self.send("START")
+    
+    def stop_measurement(self):
+        """Stop measurement sequence."""
+        self.send("STOP")
+    
+    def reset(self):
+        """Reset state machine."""
+        self.send("RESET")
+    
+    def set_state(self, state: str):
+        """Set specific state (IDLE, CHARGE, DISCHARGE)."""
+        self.send(f"STATE:{state}")
+    
+    def _simulate_data(self):
+        """Simulate measurement data at 100 Hz."""
+        import numpy as np
+        t = 0.0
+        states = ["IDLE", "CHARGE", "DISCHARGE", "IDLE"]
+        state_idx = 0
+        state_counter = 0
+        
+        while not self._stop.is_set():
+            # Cycle through states every 200 samples
+            if state_counter >= 200:
+                state_counter = 0
+                state_idx = (state_idx + 1) % len(states)
+            
+            self.state = states[state_idx]
+            state_counter += 1
+            
+            # Simulate voltages and currents
+            v1 = 12.0 + 2.0 * np.sin(t) + (np.random.rand() - 0.5) * 0.1
+            v2 = 5.0 + 0.5 * np.cos(t) + (np.random.rand() - 0.5) * 0.05
+            i1 = 1.0 + 0.3 * np.sin(t * 2) + (np.random.rand() - 0.5) * 0.02
+            i2 = 0.5 + 0.1 * np.cos(t * 3) + (np.random.rand() - 0.5) * 0.01
+            
+            line = f"MEAS:V1:{v1:.3f} V2:{v2:.3f} I1:{i1:.3f} I2:{i2:.3f} STATE:{self.state}\n"
+            packets = self.parser.push_data(line)
+            
+            if self.callback:
+                for packet in packets:
+                    self.callback(packet)
+            
+            t += 0.01
+            time.sleep(0.01)  # 100 Hz
+
+
+# Legacy compatibility (for existing code)
+class SerialReaderThread(PeltierController):
+    """Backward compatibility wrapper."""
+    def __init__(self, port: str, baud: int = 115200, callback=None, simulate=False):
+        super().__init__(port, baud, callback, simulate)
+

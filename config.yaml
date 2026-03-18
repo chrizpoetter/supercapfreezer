@@ -1,6 +1,32 @@
 # SUPERCAPFREEZER Configuration
 # =============================
-# Sensor and system configuration for Raspberry Pi
+# Dual microcontroller system configuration for Raspberry Pi
+
+# Peltier temperature controller (Arduino UNO R4)
+peltier:
+  enabled: true
+  port: /dev/ttyACM0  # Auto-detect if null
+  baud: 115200
+
+# Measurement controller (second microcontroller)
+measurement:
+  enabled: true
+  port: /dev/ttyACM1  # Auto-detect if null (looks for 2nd port)
+  baud: 115200
+  sample_rate_hz: 100  # Expected data rate
+
+# Temperature control settings
+control:
+  default_setpoint: 25.0  # Default target temperature [°C]
+  mode: "PID"             # PID or OnOff (matches Arduino firmware)
+  
+# Measurement state machine
+state_machine:
+  states:
+    - IDLE
+    - CHARGE
+    - DISCHARGE
+  auto_sequence: false  # If true, automatically cycle through states
 
 sensors:
   temperature:
@@ -34,7 +60,7 @@ sensors:
     max_temp_celsius: 30
     display_decimals: 2
 
-# Serial communication
+# Serial communication (legacy, use peltier/measurement sections instead)
 serial:
   port: /dev/ttyACM0  # Arduino port (auto-detect if not found)
   baud: 115200
@@ -47,7 +73,8 @@ logging:
   directory: ./logs
   csv_format: true  # Save as CSV (alternative: binary)
   retention_hours: 24  # Keep last 24h in memory
-  buffer_size: null  # null = auto-calculate (24h @ 10Hz = 864k samples)
+  buffer_size: null  # null = auto-calculate (24h @ 100Hz for measurements)
+  flush_interval_s: 1  # Write to disk every N seconds
   flush_interval_s: 5  # Write to disk every 5 seconds
 
 # Display
