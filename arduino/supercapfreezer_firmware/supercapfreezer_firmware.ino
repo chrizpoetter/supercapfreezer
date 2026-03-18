@@ -2,25 +2,26 @@
  * SUPERCAPFREEZER Arduino Peltier Controller
  * ==========================================
  * 
- * PT1000 Temperature Sensor + Peltier Feedback Control
+ * Raspberry Pi Temperature Input + Peltier Feedback Control
  * 
  * FEATURES:
- * - Reads PT1000 RTD via ADC (A0)
+ * - Receives measured temperature from Raspberry Pi over Serial
  * - Peltier PWM control (heater/cooler on/off or PID feedback)
  * - Simple ASCII serial communication with Raspberry Pi
  * 
  * HARDWARE:
  * - Arduino UNO R4 WiFi
- * - PT1000 sensor with conditioning circuit on A0
  * - Peltier controller PWM input on D3
  * - USB serial to Raspberry Pi
  * 
  * COMMUNICATION:
  * - Pi → Arduino: "SET:25.5" (set target temperature in °C)
+ * - Pi → Arduino: "TEMP:23.45" (current measured temperature in °C)
  * - Arduino → Pi: "TEMP:23.45 PWM:128" (every 1 second)
  */
 
 #include <stdint.h>
+#include <stdlib.h>
 
 // ===== CONTROL MODE SELECTION =====
 // Set to 0 for simple On/Off with hysteresis
@@ -30,35 +31,11 @@
 // ===== PIN CONFIGURATION =====
 #define PELTIER_PWM_PIN    3              // D3: Peltier controller PWM output
 
-// ===== TEMPERATURE SENSOR CALIBRATION (PT1000) =====
-// PT1000: R(T) = R0 * [1 + A*T + B*T² + C*(T-100)*T³]
-// Standard PT1000 coefficients (DIN 43760):
-
-#define PT1000_R0          1000.0f        // Resistance at 0°C [Ohm]
-#define PT1000_A           3.9083e-3f     // Coefficient A [1/°C]
-#define PT1000_B          -5.775e-7f      // Coefficient B [1/°C²]
-#define PT1000_C          -4.183e-12f     // Coefficient C [1/°C⁴]
-
-// ADC Configuration
-#define PT1000_ADC_PIN     A0             // Analog input A0
-#define ADC_REF_VOLTAGE    5.0f           // Reference voltage [V]
-#define ADC_RESOLUTION     1024           // 10-bit ADC (0-1023)
-
-// PT1000 Conditioning Circuit:
-// - Assumes a transimpedance amplifier with 0-5V output range
-// - Voltage divider calibration: map [0V, 5V] to [Rmin, Rmax]
-// - For example: 0V → 500 Ohm, 5V → 1500 Ohm
-// - Adjust calibration values below based on your circuit!
-
-#define PT1000_V_MIN       0.5f           // Voltage at Rmin [V] (e.g., -30°C)
-#define PT1000_V_MAX       4.5f           // Voltage at Rmax [V] (e.g., +30°C)
-#define PT1000_R_MIN       500.0f         // Resistance at V_MIN [Ohm]
-#define PT1000_R_MAX       1500.0f        // Resistance at V_MAX [Ohm]
-
 // Sampling & Control
-#define SAMPLE_RATE_HZ     10             // 10 Hz temperature sampling
+#define SAMPLE_RATE_HZ     10             // 10 Hz control update
 #define SAMPLE_INTERVAL_MS (1000 / SAMPLE_RATE_HZ)
 #define REPORT_INTERVAL_MS 1000           // Send status to Pi every 1 second
+#define TEMP_TIMEOUT_MS    2000           // Disable output if Pi temp updates stop
 
 // Serial
 #define SERIAL_BAUD        115200
@@ -78,15 +55,15 @@
 
 // ===== GLOBAL STATE =====
 static float g_setpoint_temp = 25.0f;     // Target temperature [°C]
-static float g_current_temp = 25.0f;      // Last measured temperature
+static float g_current_temp = 25.0f;      // Last temperature received from Pi
 static uint8_t g_pwm_value = 0;         // Current PWM output (0-255)
 static uint32_t g_last_sample_ms = 0;     // Last sampling timestamp
 static uint32_t g_last_report_ms = 0;     // Last report to Pi
+static uint32_t g_last_temp_rx_ms = 0;    // Last time TEMP was received from Pi
 static float g_pid_integral = 0.0f;       // PID integral accumulator
 static float g_pid_last_error = 0.0f;     // PID last error for derivative
 
 // ===== FUNCTION PROTOTYPES =====
-static float read_temperature(void);
 static void handle_serial_command(void);
 static uint8_t control_onoff(float temp, float setpoint);
 static uint8_t control_pid(float temp, float setpoint, float dt);
@@ -110,11 +87,12 @@ void setup() {
     #else
     Serial.println("# Mode: PID Feedback Control");
     #endif
-    Serial.println("# Send: SET:25.5 (to set target temp)");
+    Serial.println("# Send: SET:25.5 (setpoint), TEMP:23.45 (measured temp)");
     delay(500);
     
     g_last_sample_ms = millis();
     g_last_report_ms = millis();
+    g_last_temp_rx_ms = millis();
 }
 
 // ===== MAIN LOOP =====
@@ -126,22 +104,22 @@ void loop() {
         handle_serial_command();
     }
     
-    // Sample temperature at fixed interval
+    // Control update at fixed interval
     if (now_ms - g_last_sample_ms >= SAMPLE_INTERVAL_MS) {
         g_last_sample_ms = now_ms;
-        
-        // Read temperature
-        g_current_temp = read_temperature();
-        
-        // Calculate control output
-        #if CONTROL_MODE == 0
-        // On/Off Mode
-        g_pwm_value = control_onoff(g_current_temp, g_setpoint_temp);
-        #else
-        // PID Mode
-        float dt = (float)SAMPLE_INTERVAL_MS / 1000.0f;
-        g_pwm_value = control_pid(g_current_temp, g_setpoint_temp, dt);
-        #endif
+        if (now_ms - g_last_temp_rx_ms > TEMP_TIMEOUT_MS) {
+            g_pwm_value = ONOFF_PWM_OFF;
+        } else {
+            // Calculate control output using temperature received from Pi
+            #if CONTROL_MODE == 0
+            // On/Off Mode
+            g_pwm_value = control_onoff(g_current_temp, g_setpoint_temp);
+            #else
+            // PID Mode
+            float dt = (float)SAMPLE_INTERVAL_MS / 1000.0f;
+            g_pwm_value = control_pid(g_current_temp, g_setpoint_temp, dt);
+            #endif
+        }
         
         // Apply PWM
         analogWrite(PELTIER_PWM_PIN, g_pwm_value);
@@ -154,52 +132,6 @@ void loop() {
     }
     
     delay(5);  // Small delay to prevent busy-loop
-}
-
-// ===== TEMPERATURE READING =====
-/**
- * Reads PT1000 temperature from ADC pin
- * 
- * Process:
- * 1. Read ADC value (0-1023)
- * 2. Convert to voltage (0-5V)
- * 3. Map voltage to PT1000 resistance
- * 4. Use Callendar-Van Dusen equation to get temperature
- * 
- * Returns: Temperature in °C
- */
-static float read_temperature(void) {
-    // Step 1: Read ADC (average 4 samples for noise reduction)
-    uint16_t adc_sum = 0;
-    for (int i = 0; i < 4; i++) {
-        adc_sum += analogRead(PT1000_ADC_PIN);
-        delayMicroseconds(100);
-    }
-    uint16_t adc_val = adc_sum / 4;
-    
-    // Step 2: Convert ADC to voltage [0, 5V]
-    float voltage = (float)adc_val / ADC_RESOLUTION * ADC_REF_VOLTAGE;
-    
-    // Step 3: Map voltage to PT1000 resistance
-    // Linear interpolation based on calibration points
-    float resistance = PT1000_R_MIN + 
-                       (voltage - PT1000_V_MIN) / (PT1000_V_MAX - PT1000_V_MIN) * 
-                       (PT1000_R_MAX - PT1000_R_MIN);
-    
-    // Clamp to valid range
-    if (resistance < 500.0f)   resistance = 500.0f;
-    if (resistance > 1500.0f)  resistance = 1500.0f;
-    
-    // Step 4: Callendar-Van Dusen inverse: R → T
-    // Simplified: for small temperature ranges, linear approximation works
-    // R(T) ≈ R0 * (1 + A*T)  →  T ≈ (R - R0) / (R0 * A)
-    
-    float temp_celsius = (resistance - PT1000_R0) / (PT1000_R0 * PT1000_A);
-    
-    // Better: Use iterative Newton-Raphson for higher accuracy (optional)
-    // For now, the linear approximation is sufficient for -30..+30°C
-    
-    return temp_celsius;
 }
 
 // ===== CONTROL FUNCTIONS =====
@@ -253,7 +185,9 @@ static uint8_t control_pid(float temp, float setpoint, float dt) {
 
 /**
  * Handle serial commands from Raspberry Pi
- * Expected format: "SET:25.5" (set target to 25.5°C)
+ * Expected formats:
+ * - "SET:25.5"  (set target to 25.5°C)
+ * - "TEMP:23.45" (update measured temperature)
  */
 static void handle_serial_command(void) {
     static char cmd_buffer[20];
@@ -274,6 +208,11 @@ static void handle_serial_command(void) {
                     g_pid_integral = 0.0f;  // Reset PID state on new setpoint
                     Serial.print("# Setpoint changed to: ");
                     Serial.println(g_setpoint_temp);
+                }
+                // Parse "TEMP:XX.X" format
+                else if (cmd_buffer[0] == 'T' && cmd_buffer[1] == 'E' && cmd_buffer[2] == 'M' && cmd_buffer[3] == 'P' && cmd_buffer[4] == ':') {
+                    g_current_temp = atof(&cmd_buffer[5]);
+                    g_last_temp_rx_ms = millis();
                 }
             }
             cmd_idx = 0;
