@@ -149,16 +149,20 @@ void loop() {
  * Returns PWM value (0-255)
  */
 static uint8_t control_onoff(float temp, float setpoint) {
-    float error = setpoint - temp;
-    
-    // Cooling: turn on if above setpoint + hysteresis
-    if (error > -ONOFF_HYSTERESIS) {
-        return ONOFF_PWM_COLD;  // Full power cooling
+    // Merkt sich den letzten Schaltzustand für echte Hysterese
+    static bool cooling_on = false;
+
+    // Untere Schwelle: sicher aus
+    if (temp < setpoint - ONOFF_HYSTERESIS) {
+        cooling_on = false;
     }
-    // Dead zone: maintain current
-    else {
-        return ONOFF_PWM_OFF;  // Neutral
+    // Obere Schwelle: sicher an
+    else if (temp > setpoint + ONOFF_HYSTERESIS) {
+        cooling_on = true;
     }
+    // Dazwischen: Zustand beibehalten
+
+    return cooling_on ? ONOFF_PWM_COLD : ONOFF_PWM_OFF;
 }
 
 /**
