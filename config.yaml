@@ -2,8 +2,8 @@
 
 serial:
   # Set to null for auto-detection (/dev/ttyACM* or /dev/ttyUSB*)
-  port: /dev/ttyACM0
-  baud: 115200
+  port: /dev/serial0
+  baud: 57600
 
 trigger:
   # Automatic test trigger from incoming STM32 temperature.

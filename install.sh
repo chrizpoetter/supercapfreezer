@@ -49,7 +49,7 @@ fi
 echo -e "${GREEN}[4/6] Installing Python packages...${NC}"
 source venv/bin/activate
 pip install --upgrade pip setuptools wheel
-pip install -r requirements.txt
+pip install --prefer-binary -r requirements.txt
 
 # Step 5: Configure systemd service
 echo -e "${GREEN}[5/6] Configuring systemd service...${NC}"
