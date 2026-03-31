@@ -1,70 +1,43 @@
 # FAQ
 
-## Why does the service start but no control happens?
+## What serial format is supported?
 
-Common causes:
+Telemetry format:
 
-- Wrong serial port assignment.
-- Arduino firmware not flashed.
-- Pi is not sending TEMP: updates to Arduino.
+T:43440, V:0, I:6 mA, STATE:1, Temp: -1.2 C
 
-Check:
+ACK format:
+
+ACK: ...
+
+## How do I start a test from Pi?
+
+Send:
+
+CMD: CHARGE
+
+Use runtime option:
 
 ```bash
-python main.py --port1 /dev/ttyACM0 --port2 /dev/ttyACM1
+python main.py --start-test --port /dev/ttyACM0
 ```
 
-and observe startup logs.
+## How do I auto-trigger a test at a temperature?
+
+```bash
+python main.py --port /dev/ttyACM0 --trigger-temp -1.0 --trigger-direction below --command CHARGE
+```
+
+## Where are logs stored?
+
+Default is logs/. Change via logging.directory in config.yaml.
 
 ## How do I run without hardware?
-
-Use simulation mode:
 
 ```bash
 python main.py --simulate
 ```
 
-## Why is PWM always zero?
+## Why were protocol.h and PROTOCOL.md removed?
 
-The Arduino firmware has a temperature input timeout.
-If no TEMP: update is received for the timeout period, PWM is forced to off.
-
-## Where are logs stored?
-
-Default location is ./logs.
-Path can be changed in config.yaml under logging.directory.
-
-## How do I change the default setpoint?
-
-Edit config.yaml:
-
-- control.default_setpoint
-
-You can also send setpoint updates over serial with SET:<value>.
-
-## How do I inspect service logs?
-
-```bash
-sudo journalctl -u supercapfreezer -f
-```
-
-## Is there still a GUI?
-
-No. This branch is headless only.
-
-## Why does protocol.h mention binary packets?
-
-protocol.h documents a legacy or alternate binary protocol.
-Current runtime path in Python uses ASCII line protocol as described in PROTOCOL.md.
-
-## How do I stop the service?
-
-```bash
-sudo systemctl stop supercapfreezer.service
-```
-
-Disable autostart:
-
-```bash
-sudo systemctl disable supercapfreezer.service
-```
+This project now uses direct text line parsing for runtime communication, so the old protocol artifacts are not part of the active code path.

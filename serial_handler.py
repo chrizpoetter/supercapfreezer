@@ -1,47 +1,78 @@
-"""
-Minimal Arduino serial handler for SUPERCAPFREEZER.
-
-ASCII protocol used:
-- Pi -> Arduino: SET:25.0
-- Pi -> Arduino: TEMP:23.5
-- Arduino -> Pi: TEMP:23.45 PWM:128
-"""
+"""Serial handler for STM32 text telemetry and command ACK messages."""
 
 from __future__ import annotations
 
 import threading
 import time
+import re
 from typing import Callable, Optional
 
 
+def _extract_number(value: str) -> Optional[float]:
+    match = re.search(r"[-+]?\d*\.?\d+", value)
+    if not match:
+        return None
+    try:
+        return float(match.group(0))
+    except ValueError:
+        return None
+
+
 def parse_status_line(line: str) -> Optional[dict]:
-    """Parse one Arduino status line: TEMP:<float> PWM:<int>."""
+    """Parse one STM32 line or ACK message."""
     if not line or line.startswith("#"):
         return None
 
-    parts = line.strip().split()
+    text = line.strip()
+    if not text:
+        return None
+
+    if text.upper().startswith("ACK"):
+        return {
+            "type": "ack",
+            "ack": text,
+            "raw": text,
+        }
+
+    parts = [part.strip() for part in text.split(",") if part.strip()]
     data = {}
 
     for part in parts:
         if ":" not in part:
             continue
         key, value = part.split(":", 1)
-        data[key] = value
+        data[key.strip().upper()] = value.strip()
 
-    if "TEMP" not in data or "PWM" not in data:
+    if not data:
         return None
 
-    try:
-        return {
-            "TEMP": float(data["TEMP"]),
-            "PWM": int(float(data["PWM"])),
-        }
-    except ValueError:
+    # Expected telemetry line example:
+    # T:43440, V:0, I:6 mA, STATE:1, Temp: -1.2 C
+    t_raw = _extract_number(data.get("T", ""))
+    voltage = _extract_number(data.get("V", ""))
+    current_ma = _extract_number(data.get("I", ""))
+    state = _extract_number(data.get("STATE", ""))
+    temp_c = _extract_number(data.get("TEMP", ""))
+
+    if temp_c is None and "TEMPERATURE" in data:
+        temp_c = _extract_number(data.get("TEMPERATURE", ""))
+
+    if temp_c is None:
         return None
 
+    return {
+        "type": "telemetry",
+        "T": int(t_raw) if t_raw is not None else None,
+        "V": float(voltage) if voltage is not None else None,
+        "I_mA": float(current_ma) if current_ma is not None else None,
+        "STATE": int(state) if state is not None else None,
+        "Temp_C": float(temp_c),
+        "raw": text,
+    }
 
-class ArduinoPeltier:
-    """Small threaded serial client for the Arduino peltier controller."""
+
+class STM32Controller:
+    """Small threaded serial client for STM32 telemetry and command channel."""
 
     def __init__(
         self,
@@ -73,20 +104,19 @@ class ArduinoPeltier:
             except Exception:
                 pass
 
-    def send_setpoint(self, value: float) -> None:
-        self._send_line(f"SET:{value:.2f}")
+    def send_command(self, command: str) -> bool:
+        return self._send_line(f"CMD: {command.strip().upper()}")
 
-    def send_measured_temp(self, value: float) -> None:
-        self._send_line(f"TEMP:{value:.2f}")
-
-    def _send_line(self, line: str) -> None:
+    def _send_line(self, line: str) -> bool:
         if not self._serial or not self._serial.is_open:
-            return
+            return False
         try:
             self._serial.write((line + "\n").encode("utf-8"))
             self._serial.flush()
+            return True
         except Exception as exc:
             print(f"[SERIAL] Send failed: {exc}")
+            return False
 
     def _run(self) -> None:
         if self.simulate:
@@ -128,17 +158,29 @@ class ArduinoPeltier:
             self._run_simulated_status()
 
     def _run_simulated_status(self) -> None:
-        """Emit fake TEMP/PWM lines when no hardware is connected."""
+        """Emit fake STM32 telemetry lines when no hardware is connected."""
         import math
 
-        t = 0.0
+        t = 0
         while not self._stop.is_set():
-            temp = 25.0 + 2.0 * math.sin(t)
-            pwm = int(128 + 40 * math.sin(t * 0.5))
+            sim_time = t / 10.0
+            temp = -1.2 + 1.0 * math.sin(sim_time)
+            current_ma = 6.0 + 2.0 * math.sin(sim_time * 0.5)
+            state = 1 if sim_time % 30.0 < 10.0 else 0
             if self.on_status:
-                self.on_status({"TEMP": temp, "PWM": pwm})
-            t += 0.1
-            time.sleep(0.1)
+                self.on_status(
+                    {
+                        "type": "telemetry",
+                        "T": 43440 + t,
+                        "V": 0.0,
+                        "I_mA": current_ma,
+                        "STATE": state,
+                        "Temp_C": temp,
+                        "raw": f"T:{43440 + t}, V:0, I:{current_ma:.1f} mA, STATE:{state}, Temp: {temp:.2f} C",
+                    }
+                )
+            t += 1
+            time.sleep(0.2)
 
     @staticmethod
     def _auto_detect_port() -> Optional[str]:
@@ -153,7 +195,7 @@ class ArduinoPeltier:
 
         for port in ports:
             desc = (port.description or "").lower()
-            if "arduino" in desc or "uno" in desc or "r4" in desc:
+            if "stm" in desc or "arduino" in desc or "uno" in desc or "r4" in desc:
                 return port.device
 
         for port in ports:

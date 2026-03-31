@@ -15,9 +15,9 @@
  * - USB serial to Raspberry Pi
  * 
  * COMMUNICATION:
- * - Pi → Arduino: "SET:25.5" (set target temperature in °C)
- * - Pi → Arduino: "TEMP:23.45" (current measured temperature in °C)
- * - Arduino → Pi: "TEMP:23.45 PWM:128" (every 1 second)
+ * - Pi → Controller: "CMD: CHARGE" (start test)
+ * - Controller → Pi: "ACK: CMD: CHARGE" (command acknowledge)
+ * - Controller → Pi: "T:43440, V:0, I:6 mA, STATE:1, Temp: -1.2 C"
  */
 
 #include <stdint.h>
@@ -60,6 +60,7 @@
 static float g_setpoint_temp = 25.0f;     // Target temperature [°C]
 static float g_current_temp = 25.0f;      // Last temperature received from Pi
 static uint8_t g_pwm_value = 0;         // Current PWM output (0-255)
+static uint8_t g_test_state = 0;           // 0=IDLE, 1=CHARGE
 static uint32_t g_last_sample_ms = 0;     // Last sampling timestamp
 static uint32_t g_last_report_ms = 0;     // Last report to Pi
 static uint32_t g_last_temp_rx_ms = 0;    // Last time TEMP was received from Pi
@@ -94,7 +95,7 @@ void setup() {
     #else
     Serial.println("# Mode: PID Feedback Control");
     #endif
-    Serial.println("# Send: SET:25.5 (setpoint), TEMP:23.45 (measured temp)");
+    Serial.println("# Send: CMD: CHARGE or CMD: IDLE");
     delay(500);
     
     g_last_sample_ms = millis();
@@ -198,8 +199,8 @@ static uint8_t control_pid(float temp, float setpoint, float dt) {
 /**
  * Handle serial commands from Raspberry Pi
  * Expected formats:
- * - "SET:25.5"  (set target to 25.5°C)
- * - "TEMP:23.45" (update measured temperature)
+ * - "CMD: CHARGE" (start test)
+ * - "CMD: IDLE"   (stop test)
  */
 static void handle_serial_command(void) {
     static char cmd_buffer[20];
@@ -213,18 +214,31 @@ static void handle_serial_command(void) {
             if (cmd_idx > 0) {
                 cmd_buffer[cmd_idx] = '\0';
                 
-                // Parse "SET:XX.X" format
-                if (cmd_buffer[0] == 'S' && cmd_buffer[1] == 'E' && cmd_buffer[2] == 'T' && cmd_buffer[3] == ':') {
-                    float new_setpoint = atof(&cmd_buffer[4]);
-                    g_setpoint_temp = new_setpoint;
-                    g_pid_integral = 0.0f;  // Reset PID state on new setpoint
-                    Serial.print("# Setpoint changed to: ");
-                    Serial.println(g_setpoint_temp);
-                }
-                // Parse "TEMP:XX.X" format
-                else if (cmd_buffer[0] == 'T' && cmd_buffer[1] == 'E' && cmd_buffer[2] == 'M' && cmd_buffer[3] == 'P' && cmd_buffer[4] == ':') {
-                    g_current_temp = atof(&cmd_buffer[5]);
-                    g_last_temp_rx_ms = millis();
+                // Parse "CMD: CHARGE" / "CMD: IDLE"
+                if (
+                    cmd_buffer[0] == 'C' && cmd_buffer[1] == 'M' && cmd_buffer[2] == 'D' &&
+                    cmd_buffer[3] == ':'
+                ) {
+                    char* cmd = &cmd_buffer[4];
+                    while (*cmd == ' ') {
+                        cmd++;
+                    }
+
+                    if (cmd[0] == 'C' && cmd[1] == 'H' && cmd[2] == 'A' && cmd[3] == 'R' && cmd[4] == 'G' && cmd[5] == 'E') {
+                        g_test_state = 1;
+                        Serial.println("ACK: CMD: CHARGE");
+                    } else if (cmd[0] == 'I' && cmd[1] == 'D' && cmd[2] == 'L' && cmd[3] == 'E') {
+                        g_test_state = 0;
+                        Serial.println("ACK: CMD: IDLE");
+                    } else {
+                        Serial.print("ACK: CMD: UNKNOWN (");
+                        Serial.print(cmd);
+                        Serial.println(")");
+                    }
+                } else {
+                    Serial.print("ACK: UNKNOWN INPUT (");
+                    Serial.print(cmd_buffer);
+                    Serial.println(")");
                 }
             }
             cmd_idx = 0;
@@ -238,11 +252,17 @@ static void handle_serial_command(void) {
 
 /**
  * Send status to Raspberry Pi
- * Format: "TEMP:23.45 PWM:128"
+ * Format: "T:43440, V:0, I:6 mA, STATE:1, Temp: -1.2 C"
  */
 static void send_status_to_pi(float temp, uint8_t pwm) {
-    Serial.print("TEMP:");
+    float current_ma = ((float)pwm / 255.0f) * 20.0f;
+    Serial.print("T:");
+    Serial.print(millis());
+    Serial.print(", V:0, I:");
+    Serial.print(current_ma, 1);
+    Serial.print(" mA, STATE:");
+    Serial.print(g_test_state);
+    Serial.print(", Temp: ");
     Serial.print(temp, 2);
-    Serial.print(" PWM:");
-    Serial.println(pwm);
+    Serial.println(" C");
 }

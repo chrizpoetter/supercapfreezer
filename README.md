@@ -1,138 +1,81 @@
 # SUPERCAPFREEZER
 
-Headless Raspberry Pi control and logging stack for a dual-controller supercapacitor freezer setup.
+Headless Raspberry Pi runtime for STM32 telemetry logging and test triggering.
 
-## What This Project Does
+## Runtime Message Format
 
-- Runs on Raspberry Pi without a GUI.
-- Talks to two serial devices:
-  - Peltier controller (Arduino UNO R4 WiFi).
-  - Measurement controller (voltage/current state machine MCU).
-- Logs merged telemetry to CSV files.
-- Supports simulation mode for software-only testing.
+Incoming STM32 telemetry (example):
 
-## Current Control Architecture
+T:43440, V:0, I:6 mA, STATE:1, Temp: -1.2 C
 
-The control loop is split between Pi and Arduino:
+Incoming ACK after command (example):
 
-1. Pi computes or reads measured temperature.
-2. Pi sends measured temperature to Arduino using TEMP:<value>.
-3. Pi sends target setpoint to Arduino using SET:<value>.
-4. Arduino computes PWM and returns status line TEMP:<value> PWM:<value>.
+ACK: CMD: CHARGE
 
-Important: Arduino firmware no longer reads PT1000 directly in this branch.
+Outgoing Pi command:
 
-## Repository Layout
+CMD: CHARGE
 
-- main.py: headless runtime entrypoint.
-- serial_handler.py: threaded serial handlers for peltier and measurement controllers.
-- data_logger.py: in-memory buffers plus periodic CSV write.
-- config_loader.py: YAML config merge with defaults.
-- config.yaml: project configuration.
-- arduino/supercapfreezer_firmware.ino: Arduino controller firmware.
-- supercapfreezer.service: systemd service template.
-- install.sh: Raspberry Pi install helper.
+## Features
 
-## Requirements
+- Reads and parses STM32 telemetry line-by-line.
+- Handles ACK messages for sent commands.
+- Writes telemetry, ACK, and events to CSV logs.
+- Can auto-trigger a test command when a configured temperature threshold is reached.
+- Supports simulation mode for local testing.
 
-- Linux (Raspberry Pi OS recommended).
-- Python 3.9+.
-- Two serial links if running full hardware mode.
-- Dependencies from requirements.txt.
-
-## Installation
-
-### Option A: Manual
+## Run
 
 ```bash
 python3 -m venv venv
 source venv/bin/activate
-pip install --upgrade pip
 pip install -r requirements.txt
+python main.py --port /dev/ttyACM0
 ```
 
-### Option B: Scripted on Raspberry Pi
+Simulation:
 
 ```bash
-chmod +x install.sh
-./install.sh
-```
-
-## Running
-
-### Simulation Mode
-
-```bash
-source venv/bin/activate
 python main.py --simulate
 ```
 
-### Hardware Mode
+## Auto Trigger
+
+Trigger when temperature drops below -1.0 C:
 
 ```bash
-source venv/bin/activate
-python main.py --port1 /dev/ttyACM0 --port2 /dev/ttyACM1
+python main.py --port /dev/ttyACM0 --trigger-temp -1.0 --trigger-direction below --command CHARGE
 ```
 
-If ports are omitted, auto-detection is attempted.
+Start test directly on startup:
+
+```bash
+python main.py --port /dev/ttyACM0 --start-test
+```
 
 ## Configuration
 
-Default config file is config.yaml.
+Main config file: config.yaml
 
-Main keys used by runtime:
+Relevant sections:
 
 - serial.port
 - serial.baud
-- measurement.port
+- trigger.temperature_celsius
+- trigger.direction
+- trigger.command
+- trigger.once
 - logging.directory
 - logging.retention_hours
-- control.default_setpoint
+- logging.flush_interval_s
 
-Run with custom config path:
+## Repository Layout
 
-```bash
-python main.py --config /path/to/config.yaml
-```
-
-## Logging
-
-CSV files are written to ./logs (configurable).
-
-Columns:
-
-- timestamp_utc
-- time_elapsed_s
-- temperature_celsius
-- pwm
-- setpoint_celsius
-- v1_volts
-- v2_volts
-- i1_amps
-- i2_amps
-- meas_state
-
-## Service Deployment
-
-Install service file:
-
-```bash
-sudo cp supercapfreezer.service /etc/systemd/system/supercapfreezer.service
-sudo systemctl daemon-reload
-sudo systemctl enable --now supercapfreezer.service
-```
-
-View service logs:
-
-```bash
-sudo journalctl -u supercapfreezer -f
-```
-
-## Documentation Map
-
-- QUICKSTART.md: fastest path to run.
-- PROTOCOL.md: serial ASCII protocol details.
-- PROJECT_OVERVIEW.md: architecture and module responsibilities.
-- FAQ.md: troubleshooting.
-- IMPLEMENTATION_COMPLETE.md: implementation status notes.
-- README_NEW.md: deployment-oriented runbook.
+- main.py: runtime orchestration and trigger logic.
+- serial_handler.py: serial thread, parser, and command sending.
+- data_logger.py: CSV logger for telemetry/ACK/events.
+- config_loader.py: YAML loading with defaults.
+- config.yaml: runtime settings.
+- arduino/supercapfreezer_firmware/supercapfreezer_firmware.ino: firmware-side configuration and behavior.
+- supercapfreezer.service: systemd service template.
+- install.sh: Raspberry Pi setup helper.

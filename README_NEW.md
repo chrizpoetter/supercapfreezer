@@ -1,8 +1,6 @@
 # Deployment Runbook (Headless)
 
-This runbook focuses on running SUPERCAPFREEZER as a headless service on Raspberry Pi.
-
-## 1. System Preparation
+## 1. System Setup
 
 ```bash
 sudo apt update
@@ -21,38 +19,30 @@ pip install --upgrade pip
 pip install -r requirements.txt
 ```
 
-## 3. Firmware
+## 3. Configure Runtime
 
-Upload Arduino firmware from:
+Edit config.yaml:
 
-- arduino/supercapfreezer_firmware.ino
+- serial.port
+- serial.baud
+- trigger.temperature_celsius
+- trigger.direction
+- trigger.command
 
-Firmware expects:
-
-- SET:<value>
-- TEMP:<value>
-
-and publishes:
-
-- TEMP:<value> PWM:<value>
-
-## 4. Configure Ports
-
-Edit config.yaml or pass CLI args.
-
-Typical:
-
-- Peltier on /dev/ttyACM0
-- Measurement MCU on /dev/ttyACM1
-
-Test manually first:
+## 4. Manual Test
 
 ```bash
 source venv/bin/activate
-python main.py --port1 /dev/ttyACM0 --port2 /dev/ttyACM1
+python main.py --port /dev/ttyACM0
 ```
 
-## 5. Install systemd Service
+Or simulation:
+
+```bash
+python main.py --simulate
+```
+
+## 5. Service Install
 
 ```bash
 sudo cp supercapfreezer.service /etc/systemd/system/supercapfreezer.service
@@ -61,19 +51,21 @@ sudo systemctl enable supercapfreezer.service
 sudo systemctl start supercapfreezer.service
 ```
 
-Check status:
-
-```bash
-sudo systemctl status supercapfreezer.service
-```
-
-Tail logs:
+Check logs:
 
 ```bash
 sudo journalctl -u supercapfreezer -f
 ```
 
-## 6. Update Workflow
+## 6. Runtime Expectations
+
+- STM32 sends telemetry lines in this format:
+  - T:43440, V:0, I:6 mA, STATE:1, Temp: -1.2 C
+- Pi can send test start command:
+  - CMD: CHARGE
+- STM32 can respond with ACK line.
+
+## 7. Update Workflow
 
 ```bash
 cd /home/pi/supercapfreezer
@@ -82,18 +74,3 @@ source venv/bin/activate
 pip install -r requirements.txt
 sudo systemctl restart supercapfreezer.service
 ```
-
-## 7. Rollback Quick Method
-
-If a deployment fails:
-
-1. Checkout previous known-good commit.
-2. Restart service.
-3. Confirm serial connectivity and CSV output.
-
-## 8. Health Checks
-
-- Service active and auto-restarting on failure.
-- New CSV files in logs/.
-- Serial logs show packets from both controllers.
-- PWM values update over time in peltier status lines.

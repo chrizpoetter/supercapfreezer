@@ -2,57 +2,45 @@
 
 ## Goal
 
-SUPERCAPFREEZER provides headless runtime control and data logging for a supercapacitor freezer platform using a Raspberry Pi plus microcontrollers.
+SUPERCAPFREEZER runs on Raspberry Pi and handles:
+
+- Serial ingestion of STM32 telemetry.
+- Test-command dispatch (CMD: CHARGE).
+- Automatic trigger when a temperature threshold is reached.
+- CSV logging for telemetry, ACK messages, and events.
 
 ## Runtime Topology
 
 - Raspberry Pi process (main.py)
-  - Owns orchestration and data logging.
-  - Sends setpoint and measured temperature to peltier Arduino.
-  - Receives peltier status and measurement MCU telemetry.
+  - Owns serial connection and trigger decisions.
+  - Sends command lines to STM32.
+  - Logs incoming telemetry and ACK lines.
 
-- Peltier Controller (arduino/supercapfreezer_firmware.ino)
-  - Receives SET and TEMP over serial.
-  - Executes control loop.
-  - Outputs TEMP ... PWM ... status.
-
-- Measurement Controller (external firmware)
-  - Streams voltage/current/state data.
+- STM32 firmware (external)
+  - Streams telemetry like:
+    - T:43440, V:0, I:6 mA, STATE:1, Temp: -1.2 C
+  - Responds with ACK lines after commands.
 
 ## Main Modules
 
 - main.py
-  - Parses CLI args.
   - Loads config.
-  - Starts serial devices.
-  - Starts periodic CSV flush.
-  - Runs headless until interrupted.
+  - Starts serial connection.
+  - Applies auto-trigger logic.
 
 - serial_handler.py
-  - PeltierController and MeasurementController abstractions.
-  - Serial auto-detection fallback.
-  - Optional simulation mode.
+  - Parses telemetry and ACK messages.
+  - Sends CMD lines.
+  - Supports simulation mode.
 
 - data_logger.py
-  - Keeps in-memory rolling buffers.
-  - Writes merged rows to CSV.
-  - Exposes basic stats and retrieval helpers.
+  - Buffers records in memory.
+  - Periodically flushes to CSV.
 
 - config_loader.py
-  - Provides defaults.
-  - Deep-merges YAML overrides.
+  - Provides defaults and merges config.yaml.
 
-## Data Path Summary
+## Notes
 
-1. Serial packets arrive from controllers.
-2. Callback handlers convert packets into logger entries.
-3. Background flush writes latest merged snapshot row to CSV every second.
-4. Service mode keeps process persistent with systemd restart policy.
-
-## Operational Mode
-
-This branch is intentionally no-GUI:
-
-- No pygame dependency.
-- No UI loop or display assumptions.
-- Suitable for SSH-only or service-first deployments.
+- Legacy binary protocol artifacts were removed.
+- Arduino-specific configuration should live in firmware code only.

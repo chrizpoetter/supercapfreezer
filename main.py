@@ -1,79 +1,132 @@
-"""
-Simple headless Pi app for SUPERCAPFREEZER.
-
-Behavior:
-- Connect to Arduino serial.
-- Send setpoint: SET:<value>
-- Send measured temp from Pi: TEMP:<value>
-- Read Arduino status: TEMP:<value> PWM:<value>
-- Log status to CSV.
-"""
+"""Headless Pi app for STM32 telemetry logging and command triggering."""
 
 from __future__ import annotations
 
 import argparse
-import math
 import threading
 import time
 
 from config_loader import load_config
 from data_logger import DataLogger
-from serial_handler import ArduinoPeltier
+from serial_handler import STM32Controller
 
 
 g_logger = None
-g_setpoint = 25.0
-g_last_pi_temp = None
+g_controller = None
+g_trigger_temp = None
+g_trigger_direction = "below"
+g_trigger_command = "CHARGE"
+g_trigger_once = True
+g_triggered = False
 
 
-def on_arduino_status(packet: dict) -> None:
-    """Log Arduino status packets."""
-    global g_logger, g_setpoint, g_last_pi_temp
+def _should_trigger(temp_c: float) -> bool:
+    if g_trigger_temp is None:
+        return False
+    if g_trigger_direction == "above":
+        return temp_c >= g_trigger_temp
+    return temp_c <= g_trigger_temp
 
-    temp = packet.get("TEMP")
-    pwm = packet.get("PWM")
+def on_stm32_status(packet: dict) -> None:
+    """Process telemetry and ACK messages from STM32."""
+    global g_logger, g_controller, g_triggered
 
-    if temp is None or pwm is None:
+    packet_type = packet.get("type")
+
+    if packet_type == "ack":
+        ack_text = str(packet.get("ack", "ACK"))
+        if g_logger:
+            g_logger.push_ack(ack_text)
+        print(f"[ACK] {ack_text}")
+        return
+
+    if packet_type != "telemetry":
+        return
+
+    timestamp_raw = packet.get("T")
+    voltage = packet.get("V")
+    current_ma = packet.get("I_mA")
+    state = packet.get("STATE")
+    temp_c = packet.get("Temp_C")
+
+    if temp_c is None:
         return
 
     if g_logger:
-        g_logger.push_temperature(float(temp), int(pwm), g_setpoint)
+        g_logger.push_telemetry(
+            t_raw=timestamp_raw,
+            voltage=voltage,
+            current_ma=current_ma,
+            state=state,
+            temp_c=float(temp_c),
+            raw_message=str(packet.get("raw", "")),
+        )
 
-    # Live CLI output so current values are visible while running.
-    pi_temp_text = f"{g_last_pi_temp:.2f}" if g_last_pi_temp is not None else "--"
+    voltage_text = f"{float(voltage):.3f}" if voltage is not None else "--"
+    current_text = f"{float(current_ma):.2f}" if current_ma is not None else "--"
+
     print(
-        f"[LIVE] PI_TEMP:{pi_temp_text}C "
-        f"ARD_TEMP:{float(temp):.2f}C PWM:{int(pwm):3d} SET:{g_setpoint:.2f}C"
+        "[LIVE] "
+        f"T:{timestamp_raw if timestamp_raw is not None else '--'} "
+        f"V:{voltage_text} "
+        f"I:{current_text}mA "
+        f"STATE:{state if state is not None else '--'} "
+        f"Temp:{float(temp_c):.2f}C"
     )
 
+    if g_trigger_once and g_triggered:
+        return
 
-def make_pi_temperature_source(simulate: bool, base_temp: float):
-    """Return a function that gives the current Pi temperature input value."""
-    if not simulate:
-        return lambda now: base_temp
-
-    # Simulation: simple sine around base_temp.
-    return lambda now: base_temp + 2.0 * math.sin(now * 0.2)
+    if _should_trigger(float(temp_c)) and g_controller:
+        if g_controller.send_command(g_trigger_command):
+            g_triggered = True
+            trigger_text = (
+                f"AUTO TRIGGER: Temp={float(temp_c):.2f}C "
+                f"({g_trigger_direction} {g_trigger_temp:.2f}C) -> CMD: {g_trigger_command}"
+            )
+            print(f"[TRIGGER] {trigger_text}")
+            if g_logger:
+                g_logger.push_event(trigger_text)
 
 
 def main() -> None:
-    global g_logger, g_setpoint, g_last_pi_temp
+    global g_logger, g_controller
+    global g_trigger_temp, g_trigger_direction, g_trigger_command, g_trigger_once
 
-    parser = argparse.ArgumentParser(description="SUPERCAPFREEZER simple ASCII Pi controller")
+    parser = argparse.ArgumentParser(description="SUPERCAPFREEZER STM32 logger/controller")
 
-    # Keep both names so existing service files continue to work.
-    parser.add_argument("--port", "--port1", dest="port", default=None, help="Arduino serial port")
+    parser.add_argument("--port", dest="port", default=None, help="STM32 serial port")
     parser.add_argument("--baud", type=int, default=None, help="Serial baud")
     parser.add_argument("--simulate", action="store_true", help="Simulate temperature input")
     parser.add_argument("--config", default="config.yaml", help="Path to config.yaml")
 
-    # Simple runtime knobs.
-    parser.add_argument("--setpoint", type=float, default=None, help="Setpoint sent to Arduino")
-    parser.add_argument("--pi-temp", type=float, default=None, help="Fixed Pi temperature to send")
-    parser.add_argument("--temp-rate", type=float, default=10.0, help="Pi TEMP send rate in Hz")
-
-    # Keep old arg accepted for compatibility; it is not used.
-    parser.add_argument("--port2", default=None, help=argparse.SUPPRESS)
+    parser.add_argument(
+        "--trigger-temp",
+        type=float,
+        default=None,
+        help="Automatically send test command when temperature threshold is met",
+    )
+    parser.add_argument(
+        "--trigger-direction",
+        choices=["below", "above"],
+        default=None,
+        help="Trigger when temperature goes below/above threshold",
+    )
+    parser.add_argument(
+        "--command",
+        default=None,
+        help="Command name for test start (sent as CMD: <command>)",
+    )
+    parser.add_argument(
+        "--start-test",
+        action="store_true",
+        help="Send CMD: CHARGE immediately on startup",
+    )
+    parser.add_argument(
+        "--allow-retrigger",
+        action="store_true",
+        help="Allow repeated auto-triggers instead of one-shot behavior",
+    )
 
     args = parser.parse_args()
 
@@ -81,38 +134,58 @@ def main() -> None:
 
     baud = args.baud if args.baud is not None else int(cfg.get("serial", {}).get("baud", 115200))
     port = args.port if args.port else cfg.get("serial", {}).get("port")
-    g_setpoint = args.setpoint if args.setpoint is not None else float(cfg.get("control", {}).get("default_setpoint", 25.0))
+    trigger_cfg = cfg.get("trigger", {})
+    g_trigger_temp = args.trigger_temp if args.trigger_temp is not None else trigger_cfg.get("temperature_celsius")
+    if g_trigger_temp is not None:
+        g_trigger_temp = float(g_trigger_temp)
 
-    pi_temp_base = args.pi_temp if args.pi_temp is not None else g_setpoint
-    temp_rate_hz = max(1.0, float(args.temp_rate))
-    temp_period = 1.0 / temp_rate_hz
+    g_trigger_direction = (
+        args.trigger_direction
+        if args.trigger_direction is not None
+        else str(trigger_cfg.get("direction", "below")).lower()
+    )
+    if g_trigger_direction not in {"below", "above"}:
+        g_trigger_direction = "below"
+
+    g_trigger_command = (
+        args.command if args.command is not None else str(trigger_cfg.get("command", "CHARGE"))
+    ).strip().upper()
+
+    g_trigger_once = not args.allow_retrigger
+    if "once" in trigger_cfg and not args.allow_retrigger:
+        g_trigger_once = bool(trigger_cfg.get("once", True))
 
     log_dir = cfg.get("logging", {}).get("directory", "./logs")
     max_hours = int(cfg.get("logging", {}).get("retention_hours", 24))
     flush_interval = float(cfg.get("logging", {}).get("flush_interval_s", 1.0))
 
     print("=" * 60)
-    print("SUPERCAPFREEZER - Simple ASCII Controller")
+    print("SUPERCAPFREEZER - STM32 Telemetry Logger")
     print("=" * 60)
     print(f"Port: {port if port else ('<auto>' if not args.simulate else 'Simulation')}")
     print(f"Baud: {baud}")
-    print(f"Setpoint: {g_setpoint:.2f} C")
-    print(f"Pi temp source: {'simulated' if args.simulate else 'fixed'}")
+    print(f"Auto trigger temp: {g_trigger_temp if g_trigger_temp is not None else 'disabled'}")
+    print(f"Auto trigger direction: {g_trigger_direction}")
+    print(f"Trigger command: CMD: {g_trigger_command}")
+    print(f"Trigger mode: {'one-shot' if g_trigger_once else 'retrigger'}")
     print("=" * 60)
 
     g_logger = DataLogger(log_dir=log_dir, max_hours=max_hours)
 
-    arduino = ArduinoPeltier(
+    g_controller = STM32Controller(
         port=port,
         baud=baud,
-        on_status=on_arduino_status,
+        on_status=on_stm32_status,
         simulate=args.simulate,
     )
-    arduino.start()
+    g_controller.start()
 
-    # Give serial a moment to come up, then send setpoint once.
     time.sleep(1.0)
-    arduino.send_setpoint(g_setpoint)
+    if args.start_test:
+        if g_controller.send_command("CHARGE"):
+            print("[MAIN] Startup test command sent: CMD: CHARGE")
+            if g_logger:
+                g_logger.push_event("Startup command sent: CMD: CHARGE")
 
     def flush_loop() -> None:
         while True:
@@ -122,22 +195,17 @@ def main() -> None:
 
     threading.Thread(target=flush_loop, daemon=True).start()
 
-    pi_temp_fn = make_pi_temperature_source(args.simulate, pi_temp_base)
-
     print("[MAIN] Running. Press Ctrl+C to stop.")
 
     try:
         while True:
-            now = time.time()
-            measured_temp = pi_temp_fn(now)
-            g_last_pi_temp = measured_temp
-            arduino.send_measured_temp(measured_temp)
-            time.sleep(temp_period)
+            time.sleep(0.25)
     except KeyboardInterrupt:
         print("\n[MAIN] Interrupted by user")
     finally:
         print("[MAIN] Shutting down...")
-        arduino.stop()
+        if g_controller:
+            g_controller.stop()
         if g_logger:
             g_logger.close()
         print("[MAIN] Goodbye!")

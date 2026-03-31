@@ -34,11 +34,6 @@ echo -e "${GREEN}[2/6] Installing dependencies...${NC}"
 sudo apt install -y \
     python3-pip \
     python3-venv \
-    libsdl2-dev \
-    libsdl2-image-dev \
-    libsdl2-mixer-dev \
-    libsdl2-ttf-dev \
-    libfreetype6-dev \
     git
 
 # Step 3: Create virtual environment
@@ -74,7 +69,7 @@ StartLimitBurst=3
 Type=simple
 User=pi
 WorkingDirectory=${CURRENT_DIR}
-ExecStart=${CURRENT_DIR}/venv/bin/python main.py --port1 /dev/ttyACM0
+ExecStart=${CURRENT_DIR}/venv/bin/python main.py --port /dev/ttyACM0
 Restart=on-failure
 RestartSec=10
 StandardOutput=journal
@@ -106,7 +101,7 @@ echo ""
 echo "Next steps:"
 echo "1. Upload Arduino firmware to UNO R4 WiFi"
 echo "   - File: arduino/supercapfreezer_firmware.ino"
-echo "   - Adjust PT1000 calibration values in firmware"
+echo "   - Configure serial command handling in firmware if needed"
 echo ""
 echo "2. Test the application:"
 echo "   $ source venv/bin/activate"
@@ -122,6 +117,6 @@ echo "   $ sudo journalctl -u supercapfreezer -f"
 echo ""
 echo "Documentation:"
 echo "   - README_NEW.md (installation & usage)"
-echo "   - PROTOCOL.md (binary protocol specification)"
+echo "   - README.md (runtime and message format)"
 echo "   - config.yaml (configuration options)"
 echo ""

@@ -1,8 +1,6 @@
 # QUICKSTART
 
-Fast path for getting SUPERCAPFREEZER running in headless mode.
-
-## 1. Create Environment
+## 1. Install
 
 ```bash
 python3 -m venv venv
@@ -10,45 +8,34 @@ source venv/bin/activate
 pip install -r requirements.txt
 ```
 
-## 2. Run in Simulation
+## 2. Run Simulation
 
 ```bash
 python main.py --simulate
 ```
 
-Expected behavior:
-
-- Process starts and prints headless status.
-- CSV logs appear in logs/.
-
-## 3. Run with Hardware
+## 3. Run Hardware
 
 ```bash
-python main.py --port1 /dev/ttyACM0 --port2 /dev/ttyACM1
+python main.py --port /dev/ttyACM0
 ```
 
-Where:
+## 4. Enable Temperature Trigger
 
-- port1 is Arduino peltier controller.
-- port2 is measurement controller.
+```bash
+python main.py --port /dev/ttyACM0 --trigger-temp -1.0 --trigger-direction below --command CHARGE
+```
 
-## 4. Verify Serial Traffic
+## 5. Verify Input and ACK
 
-Peltier controller should receive:
+Incoming telemetry example:
 
-- SET:<setpoint>
-- TEMP:<measured_temp> from the Pi-side logic that supplies temperature.
+T:43440, V:0, I:6 mA, STATE:1, Temp: -1.2 C
 
-Arduino should return:
+Outgoing command example:
 
-- TEMP:<temp> PWM:<pwm>
+CMD: CHARGE
 
-Measurement controller should return lines containing:
+Incoming ACK example:
 
-- V1, V2, I1, I2, STATE
-
-## 5. Stop
-
-Press Ctrl+C.
-
-The app will stop serial threads and close logger files cleanly.
+ACK: CMD: CHARGE
