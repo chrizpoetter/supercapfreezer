@@ -1,0 +1,21 @@
+[Unit]
+Description=SUPERCAPFREEZER Temperature Monitor
+After=network.target
+StartLimitInterval=60
+StartLimitBurst=3
+
+[Service]
+Type=simple
+User=pi
+WorkingDirectory=/home/ipel/DEV/supercapfreezer
+ExecStart=/home/ipel/DEV/supercapfreezer/venv/bin/python main.py --port /dev/ttyACM0
+Restart=on-failure
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+
+PrivateTmp=yes
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target
