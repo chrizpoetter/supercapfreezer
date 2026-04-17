@@ -2,7 +2,7 @@
 
 serial:
   # Set to null for auto-detection (/dev/ttyACM* or /dev/ttyUSB*)
-  port: /dev/serial0
+  port: /dev/ttyS0
   baud: 57600
 
 trigger:
