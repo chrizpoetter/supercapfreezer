@@ -38,7 +38,7 @@
 #define SAMPLE_INTERVAL_MS (1000 / SAMPLE_RATE_HZ)
 #define REPORT_INTERVAL_MS 1000           // Send status to Pi every 1 second
 #define TEMP_TIMEOUT_MS    2000           // Disable output if Pi temp updates stop
-#define TIMEOUT_ENABLED    false          // Enables timeout 
+#define TIMEOUT_ENABLED    true          // Enables timeout 
 
 // Serial
 #define SERIAL_BAUD        9600
