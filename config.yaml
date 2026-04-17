@@ -7,7 +7,7 @@ serial:
 
 arduino_temp:
   enabled: true
-  port: /dev/ttyUSB0
+  port: /dev/ttyACM0
   baud: 9600
   decimals: 2
   send_interval_s: 0.5
