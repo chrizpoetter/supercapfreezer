@@ -27,7 +27,6 @@ fi
 # Step 1: Update system
 echo -e "${GREEN}[1/6] Updating system packages...${NC}"
 sudo apt update
-sudo apt upgrade -y
 
 # Step 2: Install dependencies
 echo -e "${GREEN}[2/6] Installing dependencies...${NC}"
