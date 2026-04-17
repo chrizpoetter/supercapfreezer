@@ -19,6 +19,13 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "port": None,
         "baud": 115200,
     },
+    "arduino_temp": {
+        "enabled": True,
+        "port": "/dev/ttyUSB0",
+        "baud": 9600,
+        "decimals": 2,
+        "send_interval_s": 0.5,
+    },
     "trigger": {
         "temperature_celsius": None,
         "direction": "below",

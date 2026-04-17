@@ -5,6 +5,7 @@ from __future__ import annotations
 import threading
 import time
 import re
+import math
 from typing import Callable, Optional
 
 
@@ -203,3 +204,62 @@ class STM32Controller:
                 return port.device
 
         return ports[0].device
+
+
+class ArduinoTemperatureSender:
+    """Simple serial sender for forwarding TEMP messages to Arduino."""
+
+    def __init__(self, port: Optional[str], baud: int = 9600):
+        self.port = port
+        self.baud = baud
+        self._serial = None
+        self.connected = False
+
+    def start(self) -> bool:
+        if not self.port:
+            return False
+
+        try:
+            import serial
+
+            self._serial = serial.Serial(self.port, self.baud, timeout=0.1)
+            self.connected = True
+            print(f"[ARDUINO] Connected to {self.port} @ {self.baud}")
+            return True
+        except Exception as exc:
+            print(f"[ARDUINO] Connect failed on {self.port}: {exc}")
+            self.connected = False
+            self._serial = None
+            return False
+
+    def stop(self) -> None:
+        if self._serial:
+            try:
+                self._serial.close()
+            except Exception:
+                pass
+        self._serial = None
+        self.connected = False
+
+    def send_temperature(self, temp_c: float, decimals: int = 2) -> bool:
+        """Send latest measured temperature to Arduino as TEMP:<value>."""
+        try:
+            temp_value = float(temp_c)
+        except (TypeError, ValueError):
+            return False
+
+        if not math.isfinite(temp_value):
+            return False
+
+        if not self._serial or not self._serial.is_open:
+            return False
+
+        precision = max(0, int(decimals))
+        try:
+            line = f"TEMP:{temp_value:.{precision}f}\n"
+            self._serial.write(line.encode("utf-8"))
+            self._serial.flush()
+            return True
+        except Exception as exc:
+            print(f"[ARDUINO] Send failed: {exc}")
+            return False

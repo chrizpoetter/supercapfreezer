@@ -8,11 +8,15 @@ import time
 
 from config_loader import load_config
 from data_logger import DataLogger
-from serial_handler import STM32Controller
+from serial_handler import STM32Controller, ArduinoTemperatureSender
 
 
 g_logger = None
 g_controller = None
+g_arduino_sender = None
+g_arduino_decimals = 2
+g_arduino_send_interval_s = 0.5
+g_arduino_last_send_ts = 0.0
 g_trigger_temp = None
 g_trigger_direction = "below"
 g_trigger_command = "CHARGE"
@@ -29,7 +33,8 @@ def _should_trigger(temp_c: float) -> bool:
 
 def on_stm32_status(packet: dict) -> None:
     """Process telemetry and ACK messages from STM32."""
-    global g_logger, g_controller, g_triggered
+    global g_logger, g_controller, g_arduino_sender, g_arduino_decimals
+    global g_arduino_send_interval_s, g_arduino_last_send_ts, g_triggered
 
     packet_type = packet.get("type")
 
@@ -74,6 +79,16 @@ def on_stm32_status(packet: dict) -> None:
         f"Temp:{float(temp_c):.2f}C"
     )
 
+    # Forward measured temperature at a controlled interval to avoid serial spam.
+    if g_arduino_sender:
+        now = time.monotonic()
+        if (
+            g_arduino_send_interval_s <= 0.0
+            or (now - g_arduino_last_send_ts) >= g_arduino_send_interval_s
+        ):
+            if g_arduino_sender.send_temperature(float(temp_c), decimals=g_arduino_decimals):
+                g_arduino_last_send_ts = now
+
     if g_trigger_once and g_triggered:
         return
 
@@ -90,7 +105,8 @@ def on_stm32_status(packet: dict) -> None:
 
 
 def main() -> None:
-    global g_logger, g_controller
+    global g_logger, g_controller, g_arduino_sender, g_arduino_decimals
+    global g_arduino_send_interval_s, g_arduino_last_send_ts
     global g_trigger_temp, g_trigger_direction, g_trigger_command, g_trigger_once
 
     parser = argparse.ArgumentParser(description="SUPERCAPFREEZER STM32 logger/controller")
@@ -159,6 +175,14 @@ def main() -> None:
     max_hours = int(cfg.get("logging", {}).get("retention_hours", 24))
     flush_interval = float(cfg.get("logging", {}).get("flush_interval_s", 1.0))
 
+    arduino_cfg = cfg.get("arduino_temp", {})
+    arduino_enabled = bool(arduino_cfg.get("enabled", True))
+    arduino_port = arduino_cfg.get("port", "/dev/ttyUSB0")
+    arduino_baud = int(arduino_cfg.get("baud", 9600))
+    g_arduino_decimals = int(arduino_cfg.get("decimals", 2))
+    g_arduino_send_interval_s = float(arduino_cfg.get("send_interval_s", 0.5))
+    g_arduino_last_send_ts = 0.0
+
     print("=" * 60)
     print("SUPERCAPFREEZER - STM32 Telemetry Logger")
     print("=" * 60)
@@ -168,6 +192,11 @@ def main() -> None:
     print(f"Auto trigger direction: {g_trigger_direction}")
     print(f"Trigger command: CMD: {g_trigger_command}")
     print(f"Trigger mode: {'one-shot' if g_trigger_once else 'retrigger'}")
+    print(
+        f"Arduino temp forward: {'enabled' if arduino_enabled else 'disabled'}"
+        f" ({arduino_port if arduino_port else 'no port'} @ {arduino_baud}, "
+        f"every {g_arduino_send_interval_s:.2f}s)"
+    )
     print("=" * 60)
 
     g_logger = DataLogger(log_dir=log_dir, max_hours=max_hours)
@@ -179,6 +208,10 @@ def main() -> None:
         simulate=args.simulate,
     )
     g_controller.start()
+
+    if arduino_enabled:
+        g_arduino_sender = ArduinoTemperatureSender(port=arduino_port, baud=arduino_baud)
+        g_arduino_sender.start()
 
     time.sleep(1.0)
     if args.start_test:
@@ -206,6 +239,8 @@ def main() -> None:
         print("[MAIN] Shutting down...")
         if g_controller:
             g_controller.stop()
+        if g_arduino_sender:
+            g_arduino_sender.stop()
         if g_logger:
             g_logger.close()
         print("[MAIN] Goodbye!")

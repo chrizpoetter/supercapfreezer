@@ -5,6 +5,13 @@ serial:
   port: /dev/ttyS0
   baud: 57600
 
+arduino_temp:
+  enabled: true
+  port: /dev/ttyUSB0
+  baud: 9600
+  decimals: 2
+  send_interval_s: 0.5
+
 trigger:
   # Automatic test trigger from incoming STM32 temperature.
   # Set to null to disable auto trigger.
