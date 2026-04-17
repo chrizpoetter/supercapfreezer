@@ -263,3 +263,26 @@ class ArduinoTemperatureSender:
         except Exception as exc:
             print(f"[ARDUINO] Send failed: {exc}")
             return False
+
+    def send_setpoint(self, setpoint_c: float, decimals: int = 2) -> bool:
+        """Send target setpoint to Arduino as SET:<value>."""
+        try:
+            setpoint_value = float(setpoint_c)
+        except (TypeError, ValueError):
+            return False
+
+        if not math.isfinite(setpoint_value):
+            return False
+
+        if not self._serial or not self._serial.is_open:
+            return False
+
+        precision = max(0, int(decimals))
+        try:
+            line = f"SET:{setpoint_value:.{precision}f}\n"
+            self._serial.write(line.encode("utf-8"))
+            self._serial.flush()
+            return True
+        except Exception as exc:
+            print(f"[ARDUINO] Send failed: {exc}")
+            return False

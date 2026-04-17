@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import sys
 import threading
 import time
 
@@ -30,6 +31,53 @@ def _should_trigger(temp_c: float) -> bool:
     if g_trigger_direction == "above":
         return temp_c >= g_trigger_temp
     return temp_c <= g_trigger_temp
+
+
+def _runtime_command_loop() -> None:
+    """Handle runtime stdin commands for manual Arduino control."""
+    global g_arduino_sender, g_arduino_decimals, g_logger
+
+    print("[CMD] Runtime console enabled. Use: set <temp_c> (example: set 24.5)")
+    while True:
+        try:
+            line = input()
+        except EOFError:
+            break
+        except Exception:
+            continue
+
+        command = line.strip()
+        if not command:
+            continue
+
+        lower = command.lower()
+        if lower in {"help", "?"}:
+            print("[CMD] Commands: set <temp_c>, help")
+            continue
+
+        if lower.startswith("set "):
+            value_text = command[4:].strip()
+            try:
+                setpoint = float(value_text)
+            except ValueError:
+                print(f"[CMD] Invalid setpoint: {value_text}")
+                continue
+
+            if not g_arduino_sender:
+                print("[CMD] Arduino sender not configured")
+                continue
+
+            if g_arduino_sender.send_setpoint(setpoint, decimals=g_arduino_decimals):
+                print(f"[CMD] Arduino SET sent: {setpoint:.{g_arduino_decimals}f}")
+                if g_logger:
+                    g_logger.push_event(
+                        f"Arduino runtime SET sent: {setpoint:.{g_arduino_decimals}f}"
+                    )
+            else:
+                print("[CMD] Failed to send Arduino SET")
+            continue
+
+        print(f"[CMD] Unknown command: {command}")
 
 def on_stm32_status(packet: dict) -> None:
     """Process telemetry and ACK messages from STM32."""
@@ -115,6 +163,17 @@ def main() -> None:
     parser.add_argument("--baud", type=int, default=None, help="Serial baud")
     parser.add_argument("--simulate", action="store_true", help="Simulate temperature input")
     parser.add_argument("--config", default="config.yaml", help="Path to config.yaml")
+    parser.add_argument(
+        "--runtime-commands",
+        action="store_true",
+        help="Enable runtime stdin commands (set <temp_c>)",
+    )
+    parser.add_argument(
+        "--arduino-setpoint",
+        type=float,
+        default=None,
+        help="Send SET:<value> to Arduino once at startup",
+    )
 
     parser.add_argument(
         "--trigger-temp",
@@ -182,6 +241,13 @@ def main() -> None:
     g_arduino_decimals = int(arduino_cfg.get("decimals", 2))
     g_arduino_send_interval_s = float(arduino_cfg.get("send_interval_s", 0.5))
     g_arduino_last_send_ts = 0.0
+    arduino_setpoint = (
+        args.arduino_setpoint
+        if args.arduino_setpoint is not None
+        else arduino_cfg.get("setpoint_celsius")
+    )
+    if arduino_setpoint is not None:
+        arduino_setpoint = float(arduino_setpoint)
 
     print("=" * 60)
     print("SUPERCAPFREEZER - STM32 Telemetry Logger")
@@ -227,6 +293,10 @@ def main() -> None:
             time.sleep(flush_interval)
 
     threading.Thread(target=flush_loop, daemon=True).start()
+
+    runtime_commands_enabled = args.runtime_commands or sys.stdin.isatty()
+    if runtime_commands_enabled:
+        threading.Thread(target=_runtime_command_loop, daemon=True).start()
 
     print("[MAIN] Running. Press Ctrl+C to stop.")
 

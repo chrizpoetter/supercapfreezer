@@ -11,6 +11,7 @@ arduino_temp:
   baud: 9600
   decimals: 2
   send_interval_s: 0.5
+  setpoint_celsius: null
 
 trigger:
   # Automatic test trigger from incoming STM32 temperature.
