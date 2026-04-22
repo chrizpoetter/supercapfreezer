@@ -29,16 +29,19 @@
 #define CONTROL_MODE 0  // Change this to switch between modes
 
 // ===== PIN CONFIGURATION =====
-#define PELTIER_PWM_PIN    3              // D3: Peltier controller PWM output
+#define PELTIER_PWM_PIN_ONE    5              // D5: Peltier controller PWM output
+#define PELTIER_PWM_PIN_TWO    6              // D6: Peltier controller PWM output
+
 
 // Sampling & Control
 #define SAMPLE_RATE_HZ     10             // 10 Hz control update
 #define SAMPLE_INTERVAL_MS (1000 / SAMPLE_RATE_HZ)
 #define REPORT_INTERVAL_MS 1000           // Send status to Pi every 1 second
 #define TEMP_TIMEOUT_MS    2000           // Disable output if Pi temp updates stop
+#define TIMEOUT_ENABLED    false          // Enables timeout 
 
 // Serial
-#define SERIAL_BAUD        115200
+#define SERIAL_BAUD        9600
 
 // ===== CONTROL PARAMETERS =====
 
@@ -71,9 +74,13 @@ static void send_status_to_pi(float temp, uint8_t pwm);
 
 // ===== SETUP =====
 void setup() {
-    // Initialize PWM output pin
-    pinMode(PELTIER_PWM_PIN, OUTPUT);
-    analogWrite(PELTIER_PWM_PIN, 0);    // Initialize to off
+    // Initialize PWM output pins
+    pinMode(PELTIER_PWM_PIN_ONE, OUTPUT);
+    pinMode(PELTIER_PWM_PIN_TWO, OUTPUT);
+
+    analogWrite(PELTIER_PWM_PIN_ONE, 0);    // Initialize to off
+    analogWrite(PELTIER_PWM_PIN_TWO, 0);    // Initialize to off
+
     
     // Initialize serial
     Serial.begin(SERIAL_BAUD);
@@ -107,7 +114,7 @@ void loop() {
     // Control update at fixed interval
     if (now_ms - g_last_sample_ms >= SAMPLE_INTERVAL_MS) {
         g_last_sample_ms = now_ms;
-        if (now_ms - g_last_temp_rx_ms > TEMP_TIMEOUT_MS) {
+        if (now_ms - g_last_temp_rx_ms > TEMP_TIMEOUT_MS && TIMEOUT_ENABLED) {
             g_pwm_value = ONOFF_PWM_OFF;
         } else {
             // Calculate control output using temperature received from Pi
@@ -121,8 +128,9 @@ void loop() {
             #endif
         }
         
-        // Apply PWM
-        analogWrite(PELTIER_PWM_PIN, g_pwm_value);
+        // Apply PWM to both Peltier Elements
+        analogWrite(PELTIER_PWM_PIN_ONE, g_pwm_value);
+        analogWrite(PELTIER_PWM_PIN_TWO, g_pwm_value);
     }
     
     // Send status to Pi periodically
@@ -141,16 +149,20 @@ void loop() {
  * Returns PWM value (0-255)
  */
 static uint8_t control_onoff(float temp, float setpoint) {
-    float error = setpoint - temp;
-    
-    // Cooling: turn on if above setpoint + hysteresis
-    if (error > -ONOFF_HYSTERESIS) {
-        return ONOFF_PWM_COLD;  // Full power cooling
+    // Merkt sich den letzten Schaltzustand für echte Hysterese
+    static bool cooling_on = false;
+
+    // Untere Schwelle: sicher aus
+    if (temp < setpoint - ONOFF_HYSTERESIS) {
+        cooling_on = false;
     }
-    // Dead zone: maintain current
-    else {
-        return ONOFF_PWM_OFF;  // Neutral
+    // Obere Schwelle: sicher an
+    else if (temp > setpoint + ONOFF_HYSTERESIS) {
+        cooling_on = true;
     }
+    // Dazwischen: Zustand beibehalten
+
+    return cooling_on ? ONOFF_PWM_COLD : ONOFF_PWM_OFF;
 }
 
 /**

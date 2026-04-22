@@ -1,350 +1,288 @@
-"""
-SUPERCAPFREEZER Dual Serial Handler
-====================================
+"""Serial handler for STM32 text telemetry and command ACK messages."""
 
-Handles ASCII protocol communication with two microcontrollers:
-1. Arduino (Peltier Controller) - Temperature control
-2. Measurement MCU - Voltage/Current measurement with state machine
-
-Simple ASCII line-based protocol for both devices.
-"""
+from __future__ import annotations
 
 import threading
 import time
-from typing import Optional, Callable, Dict
+import re
+import math
+from typing import Callable, Optional
 
 
-class ASCIILineParser:
-    """
-    Simple ASCII line parser for both microcontrollers.
-    
-    Handles:
-    - Arduino: "TEMP:23.45 PWM:128"
-    - Measurement: "MEAS:V1:12.34 V2:5.67 I1:0.123 I2:0.456 STATE:CHARGE"
-    - Comments: "# Message"
-    """
-    
-    def __init__(self):
-        self.line_buffer = ""
-        self.stats = {
-            'total_lines': 0,
-            'valid_lines': 0,
-            'parse_errors': 0,
-            'comment_lines': 0,
-        }
-    
-    def push_data(self, data: str) -> list:
-        """
-        Push incoming data (can be partial lines).
-        Returns list of parsed packets (one per complete line).
-        """
-        packets = []
-        self.line_buffer += data
-        
-        # Process complete lines
-        while '\n' in self.line_buffer:
-            line, self.line_buffer = self.line_buffer.split('\n', 1)
-            line = line.strip()
-            
-            if line:
-                packet = self._parse_line(line)
-                if packet:
-                    packets.append(packet)
-        
-        return packets
-    
-    def _parse_line(self, line: str) -> Optional[dict]:
-        """Parse a single line into a packet dict."""
-        self.stats['total_lines'] += 1
-        
-        # Skip comments
-        if line.startswith('#'):
-            self.stats['comment_lines'] += 1
-            return None
-        
-        try:
-            # Parse key:value pairs
-            parts = line.split()
-            data = {}
-            
-            for part in parts:
-                if ':' in part:
-                    key, value = part.split(':', 1)
-                    # Try to convert to float, otherwise keep as string
-                    try:
-                        data[key] = float(value)
-                    except ValueError:
-                        data[key] = value
-            
-            if data:
-                self.stats['valid_lines'] += 1
-                return data
-            
-        except Exception:
-            self.stats['parse_errors'] += 1
-        
+def _extract_number(value: str) -> Optional[float]:
+    match = re.search(r"[-+]?\d*\.?\d+", value)
+    if not match:
         return None
-    
-    def get_stats(self) -> dict:
-        """Return parsing statistics."""
-        return self.stats.copy()
-    
-    def reset_stats(self):
-        """Reset statistics counters."""
-        self.stats = {
-            'total_lines': 0,
-            'valid_lines': 0,
-            'parse_errors': 0,
-            'comment_lines': 0,
-        }
+    try:
+        return float(match.group(0))
+    except ValueError:
+        return None
 
 
-class SerialDevice:
-        
-        if packet_crc != calculated_crc:
-            return None
-        
-        # Parse header
-        frame_type = self.buffer[2]
-        samples_count = self.buffer[3]
-        timestamp_ms = struct.unpack_from('<I', self.buffer, 4)[0]
-        seq_num = struct.unpack_from('<H', self.buffer, 8)[0]
-        
-        # Parse payload
-        samples = []
-        payload_offset = self.HEADER_SIZE
-        
-        for i in range(samples_count):
-            offset = payload_offset + i * self.SAMPLE_SIZE
-            raw_int16 = struct.unpack_from('<h', self.buffer, offset)[0]
-            value = raw_int16 / 100.0  # Convert back to float (divide by 100)
-            samples.append(value)
-        
+def parse_status_line(line: str) -> Optional[dict]:
+    """Parse one STM32 line or ACK message."""
+    if not line or line.startswith("#"):
+        return None
+
+    text = line.strip()
+    if not text:
+        return None
+
+    if text.upper().startswith("ACK"):
         return {
-            'type': frame_type,
-            'timestamp_ms': timestamp_ms,
-            'seq_num': seq_num,
-            'samples': samples,
-            'values': samples[0] if len(samples) == 1 else samples,  # Convenience
+            "type": "ack",
+            "ack": text,
+            "raw": text,
         }
-    
-    @staticmethod
-    def _crc16_ccitt(data: bytes) -> int:
-        """
-        Calculate CRC16-CCITT checksum.
-        
-        Polynomial: 0x1021
-        Init: 0xFFFF
-        """
-        crc = 0xFFFF
-class SerialDevice:
-    """
-    Handles serial communication with one microcontroller.
-    Threaded reader with ASCII line parsing.
-    """
-    
-    def __init__(self, name: str, port: Optional[str], baud: int = 115200, 
-                 callback: Optional[Callable] = None, simulate: bool = False):
-        self.name = name
+
+    parts = [part.strip() for part in text.split(",") if part.strip()]
+    data = {}
+
+    for part in parts:
+        if ":" not in part:
+            continue
+        key, value = part.split(":", 1)
+        data[key.strip().upper()] = value.strip()
+
+    if not data:
+        return None
+
+    # Expected telemetry line example:
+    # T:43440, V:0, I:6 mA, STATE:1, Temp: -1.2 C
+    t_raw = _extract_number(data.get("T", ""))
+    voltage = _extract_number(data.get("V", ""))
+    current_ma = _extract_number(data.get("I", ""))
+    state = _extract_number(data.get("STATE", ""))
+    temp_c = _extract_number(data.get("TEMP", ""))
+
+    if temp_c is None and "TEMPERATURE" in data:
+        temp_c = _extract_number(data.get("TEMPERATURE", ""))
+
+    if temp_c is None:
+        return None
+
+    return {
+        "type": "telemetry",
+        "T": int(t_raw) if t_raw is not None else None,
+        "V": float(voltage) if voltage is not None else None,
+        "I_mA": float(current_ma) if current_ma is not None else None,
+        "STATE": int(state) if state is not None else None,
+        "Temp_C": float(temp_c),
+        "raw": text,
+    }
+
+
+class STM32Controller:
+    """Small threaded serial client for STM32 telemetry and command channel."""
+
+    def __init__(
+        self,
+        port: Optional[str],
+        baud: int = 115200,
+        on_status: Optional[Callable[[dict], None]] = None,
+        simulate: bool = False,
+    ):
         self.port = port
         self.baud = baud
-        self.callback = callback
+        self.on_status = on_status
         self.simulate = simulate
+
         self._stop = threading.Event()
-        self.parser = ASCIILineParser()
-        self.thread = threading.Thread(target=self._run, daemon=True)
-        self.ser = None
+        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._serial = None
+        self._line_buffer = ""
+
         self.connected = False
-    
-    def start(self):
-        """Start reader thread."""
-        self.thread.start()
-    
-    def stop(self):
-        """Stop reader thread."""
+
+    def start(self) -> None:
+        self._thread.start()
+
+    def stop(self) -> None:
         self._stop.set()
-        if self.ser:
+        if self._serial:
             try:
-                self.ser.close()
-            except:
+                self._serial.close()
+            except Exception:
                 pass
-    
-    def send(self, command: str):
-        """Send command to device (adds newline)."""
-        if self.ser and self.ser.is_open:
-            try:
-                self.ser.write(f"{command}\n".encode('utf-8'))
-                self.ser.flush()
-            except Exception as e:
-                print(f"[{self.name}] Send error: {e}")
-    
-    def _run(self):
-        """Main thread loop."""
+
+    def send_command(self, command: str) -> bool:
+        return self._send_line(f"CMD: {command.strip().upper()}")
+
+    def _send_line(self, line: str) -> bool:
+        if not self._serial or not self._serial.is_open:
+            return False
+        try:
+            self._serial.write((line + "\n").encode("utf-8"))
+            self._serial.flush()
+            return True
+        except Exception as exc:
+            print(f"[SERIAL] Send failed: {exc}")
+            return False
+
+    def _run(self) -> None:
         if self.simulate:
-            self._simulate_data()
+            self.connected = True
+            self._run_simulated_status()
             return
-        
-        # Auto-detect port if not provided
+
         port = self.port or self._auto_detect_port()
         if not port:
-            print(f"[{self.name}] No port found. Simulation mode.")
-            self._simulate_data()
+            print("[SERIAL] No serial port found, switching to simulate mode.")
+            self.connected = True
+            self._run_simulated_status()
             return
-        
+
         try:
             import serial
-            self.ser = serial.Serial(port, self.baud, timeout=0.1)
+
+            self._serial = serial.Serial(port, self.baud, timeout=0.1)
             self.connected = True
-            print(f"[{self.name}] Connected to {port} @ {self.baud} baud")
-            
+            print(f"[SERIAL] Connected to {port} @ {self.baud}")
+
             while not self._stop.is_set():
-                if self.ser.in_waiting > 0:
-                    # Read available data
-                    data = self.ser.read(self.ser.in_waiting).decode('utf-8', errors='ignore')
-                    packets = self.parser.push_data(data)
-                    
-                    # Call callback for each packet
-                    if self.callback:
-                        for packet in packets:
-                            self.callback(packet)
-                else:
-                    time.sleep(0.01)
-        
-        except Exception as e:
-            print(f"[{self.name}] Serial error: {e}")
-            self.connected = False
-            self._simulate_data()
-    
+                data = self._serial.read(self._serial.in_waiting or 1)
+                if not data:
+                    continue
+
+                chunk = data.decode("utf-8", errors="ignore")
+                self._line_buffer += chunk
+
+                while "\n" in self._line_buffer:
+                    line, self._line_buffer = self._line_buffer.split("\n", 1)
+                    parsed = parse_status_line(line.strip())
+                    if parsed and self.on_status:
+                        self.on_status(parsed)
+
+        except Exception as exc:
+            print(f"[SERIAL] Read loop failed: {exc}")
+            self.connected = True
+            self._run_simulated_status()
+
+    def _run_simulated_status(self) -> None:
+        """Emit fake STM32 telemetry lines when no hardware is connected."""
+        import math
+
+        t = 0
+        while not self._stop.is_set():
+            sim_time = t / 10.0
+            temp = -1.2 + 1.0 * math.sin(sim_time)
+            current_ma = 6.0 + 2.0 * math.sin(sim_time * 0.5)
+            state = 1 if sim_time % 30.0 < 10.0 else 0
+            if self.on_status:
+                self.on_status(
+                    {
+                        "type": "telemetry",
+                        "T": 43440 + t,
+                        "V": 0.0,
+                        "I_mA": current_ma,
+                        "STATE": state,
+                        "Temp_C": temp,
+                        "raw": f"T:{43440 + t}, V:0, I:{current_ma:.1f} mA, STATE:{state}, Temp: {temp:.2f} C",
+                    }
+                )
+            t += 1
+            time.sleep(0.2)
+
     @staticmethod
     def _auto_detect_port() -> Optional[str]:
-        """Try to detect Arduino/MCU port automatically."""
         try:
             from serial.tools import list_ports
-        except:
+        except Exception:
             return None
-        
+
         ports = list(list_ports.comports())
         if not ports:
             return None
-        
-        # Prefer Arduino-like descriptions
-        for p in ports:
-            desc = (p.description or "").lower()
-            if "arduino" in desc or "r4" in desc or "uno" in desc:
-                return p.device
-        
-        # Fallback: first ACM/USB
-        for p in ports:
-            if p.device.startswith("/dev/ttyACM") or p.device.startswith("/dev/ttyUSB"):
-                return p.device
-        
-        return ports[0].device if ports else None
-    
-    def _simulate_data(self):
-        """Simulate data for testing."""
-        pass  # Overridden by subclasses
-    
-    def get_stats(self) -> dict:
-        """Return parser statistics."""
-        return self.parser.get_stats()
-    
-    def is_connected(self) -> bool:
-        """Check if device is connected."""
-        return self.connected
+
+        for port in ports:
+            desc = (port.description or "").lower()
+            if "stm" in desc or "arduino" in desc or "uno" in desc or "r4" in desc:
+                return port.device
+
+        for port in ports:
+            if port.device.startswith("/dev/ttyACM") or port.device.startswith("/dev/ttyUSB"):
+                return port.device
+
+        return ports[0].device
 
 
-class PeltierController(SerialDevice):
-    """Arduino Peltier temperature controller."""
-    
-    def __init__(self, port: Optional[str], baud: int = 115200, 
-                 callback: Optional[Callable] = None, simulate: bool = False):
-        super().__init__("Peltier", port, baud, callback, simulate)
-    
-    def set_temperature(self, temp: float):
-        """Send temperature setpoint to Arduino."""
-        self.send(f"SET:{temp:.2f}")
-    
-    def _simulate_data(self):
-        """Simulate temperature data."""
-        import numpy as np
-        t = 0.0
-        
-        while not self._stop.is_set():
-            temp = 25.0 + 3.0 * np.sin(t) + (np.random.rand() - 0.5) * 0.3
-            pwm = int(128 + 50 * np.sin(t * 0.5))
-            
-            line = f"TEMP:{temp:.2f} PWM:{pwm}\n"
-            packets = self.parser.push_data(line)
-            
-            if self.callback:
-                for packet in packets:
-                    self.callback(packet)
-            
-            t += 0.1
-            time.sleep(0.1)
+class ArduinoTemperatureSender:
+    """Simple serial sender for forwarding TEMP messages to Arduino."""
 
+    def __init__(self, port: Optional[str], baud: int = 9600):
+        self.port = port
+        self.baud = baud
+        self._serial = None
+        self.connected = False
 
-class MeasurementController(SerialDevice):
-    """Second microcontroller for voltage/current measurements."""
-    
-    def __init__(self, port: Optional[str], baud: int = 115200, 
-                 callback: Optional[Callable] = None, simulate: bool = False):
-        super().__init__("Measurement", port, baud, callback, simulate)
-        self.state = "IDLE"
-    
-    def start_measurement(self):
-        """Start measurement sequence."""
-        self.send("START")
-    
-    def stop_measurement(self):
-        """Stop measurement sequence."""
-        self.send("STOP")
-    
-    def reset(self):
-        """Reset state machine."""
-        self.send("RESET")
-    
-    def set_state(self, state: str):
-        """Set specific state (IDLE, CHARGE, DISCHARGE)."""
-        self.send(f"STATE:{state}")
-    
-    def _simulate_data(self):
-        """Simulate measurement data at 100 Hz."""
-        import numpy as np
-        t = 0.0
-        states = ["IDLE", "CHARGE", "DISCHARGE", "IDLE"]
-        state_idx = 0
-        state_counter = 0
-        
-        while not self._stop.is_set():
-            # Cycle through states every 200 samples
-            if state_counter >= 200:
-                state_counter = 0
-                state_idx = (state_idx + 1) % len(states)
-            
-            self.state = states[state_idx]
-            state_counter += 1
-            
-            # Simulate voltages and currents
-            v1 = 12.0 + 2.0 * np.sin(t) + (np.random.rand() - 0.5) * 0.1
-            v2 = 5.0 + 0.5 * np.cos(t) + (np.random.rand() - 0.5) * 0.05
-            i1 = 1.0 + 0.3 * np.sin(t * 2) + (np.random.rand() - 0.5) * 0.02
-            i2 = 0.5 + 0.1 * np.cos(t * 3) + (np.random.rand() - 0.5) * 0.01
-            
-            line = f"MEAS:V1:{v1:.3f} V2:{v2:.3f} I1:{i1:.3f} I2:{i2:.3f} STATE:{self.state}\n"
-            packets = self.parser.push_data(line)
-            
-            if self.callback:
-                for packet in packets:
-                    self.callback(packet)
-            
-            t += 0.01
-            time.sleep(0.01)  # 100 Hz
+    def start(self) -> bool:
+        if not self.port:
+            return False
 
+        try:
+            import serial
 
-# Legacy compatibility (for existing code)
-class SerialReaderThread(PeltierController):
-    """Backward compatibility wrapper."""
-    def __init__(self, port: str, baud: int = 115200, callback=None, simulate=False):
-        super().__init__(port, baud, callback, simulate)
+            self._serial = serial.Serial(self.port, self.baud, timeout=0.1)
+            self.connected = True
+            print(f"[ARDUINO] Connected to {self.port} @ {self.baud}")
+            return True
+        except Exception as exc:
+            print(f"[ARDUINO] Connect failed on {self.port}: {exc}")
+            self.connected = False
+            self._serial = None
+            return False
 
+    def stop(self) -> None:
+        if self._serial:
+            try:
+                self._serial.close()
+            except Exception:
+                pass
+        self._serial = None
+        self.connected = False
+
+    def send_temperature(self, temp_c: float, decimals: int = 2) -> bool:
+        """Send latest measured temperature to Arduino as TEMP:<value>."""
+        try:
+            temp_value = float(temp_c)
+        except (TypeError, ValueError):
+            return False
+
+        if not math.isfinite(temp_value):
+            return False
+
+        if not self._serial or not self._serial.is_open:
+            return False
+
+        precision = max(0, int(decimals))
+        try:
+            line = f"TEMP:{temp_value:.{precision}f}\n"
+            self._serial.write(line.encode("utf-8"))
+            self._serial.flush()
+            return True
+        except Exception as exc:
+            print(f"[ARDUINO] Send failed: {exc}")
+            return False
+
+    def send_setpoint(self, setpoint_c: float, decimals: int = 2) -> bool:
+        """Send target setpoint to Arduino as SET:<value>."""
+        try:
+            setpoint_value = float(setpoint_c)
+        except (TypeError, ValueError):
+            return False
+
+        if not math.isfinite(setpoint_value):
+            return False
+
+        if not self._serial or not self._serial.is_open:
+            return False
+
+        precision = max(0, int(decimals))
+        try:
+            line = f"SET:{setpoint_value:.{precision}f}\n"
+            self._serial.write(line.encode("utf-8"))
+            self._serial.flush()
+            return True
+        except Exception as exc:
+            print(f"[ARDUINO] Send failed: {exc}")
+            return False

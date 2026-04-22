@@ -1,112 +1,28 @@
-# SUPERCAPFREEZER Configuration
-# =============================
-# Dual microcontroller system configuration for Raspberry Pi
+# SUPERCAPFREEZER runtime configuration
 
-# Peltier temperature controller (Arduino UNO R4)
-peltier:
-  enabled: true
-  port: /dev/ttyACM0  # Auto-detect if null
-  baud: 115200
-
-# Measurement controller (second microcontroller)
-measurement:
-  enabled: true
-  port: /dev/ttyACM1  # Auto-detect if null (looks for 2nd port)
-  baud: 115200
-  sample_rate_hz: 100  # Expected data rate
-
-# Temperature control settings
-control:
-  default_setpoint: 25.0  # Default target temperature [°C]
-  mode: "PID"             # PID or OnOff (matches Arduino firmware)
-  
-# Measurement state machine
-state_machine:
-  states:
-    - IDLE
-    - CHARGE
-    - DISCHARGE
-  auto_sequence: false  # If true, automatically cycle through states
-
-sensors:
-  temperature:
-    # PT1000 sensor configuration
-    enabled: true
-    adc_pin: A0
-    adc_resolution: 10  # bits (0-1023 for 10-bit ADC)
-    adc_ref_voltage: 5.0  # volts
-    
-    # PT1000 Callendar-Van Dusen coefficients (DIN 43760)
-    calibration:
-      r0: 1000.0  # Resistance at 0°C [Ohm]
-      a: 0.003908  # Coefficient A
-      b: -5.775e-7  # Coefficient B
-      c: -4.183e-12  # Coefficient C
-    
-    # Voltage-to-Resistance mapping (based on conditioning circuit)
-    # Adjust these values based on your PT1000 circuit design
-    voltage_mapping:
-      v_min: 0.5   # Voltage at minimum temperature [V]
-      v_max: 4.5   # Voltage at maximum temperature [V]
-      r_min: 500.0  # Resistance at v_min [Ohm]
-      r_max: 1500.0  # Resistance at v_max [Ohm]
-    
-    # Sampling
-    sample_rate_hz: 10
-    averaging_samples: 4  # Number of ADC reads to average
-    
-    # Range and limits
-    min_temp_celsius: -30
-    max_temp_celsius: 30
-    display_decimals: 2
-
-# Serial communication (legacy, use peltier/measurement sections instead)
 serial:
-  port: /dev/ttyACM0  # Arduino port (auto-detect if not found)
-  baud: 115200
-  timeout_ms: 1000
-  retry_interval_s: 5
+  # Set to null for auto-detection (/dev/ttyACM* or /dev/ttyUSB*)
+  port: /dev/ttyS0
+  baud: 57600
 
-# Data logging
+arduino_temp:
+  enabled: true
+  port: /dev/ttyACM0
+  baud: 9600
+  decimals: 2
+  send_interval_s: 0.5
+  setpoint_celsius: null
+
+trigger:
+  # Automatic test trigger from incoming STM32 temperature.
+  # Set to null to disable auto trigger.
+  temperature_celsius: -1.0
+  direction: below   # below | above
+  command: CHARGE
+  once: true
+
 logging:
   enabled: true
   directory: ./logs
-  csv_format: true  # Save as CSV (alternative: binary)
-  retention_hours: 24  # Keep last 24h in memory
-  buffer_size: null  # null = auto-calculate (24h @ 100Hz for measurements)
-  flush_interval_s: 1  # Write to disk every N seconds
-  flush_interval_s: 5  # Write to disk every 5 seconds
-
-# Display
-display:
-  width: 480
-  height: 320
-  fullscreen: false
-  framerate_hz: 30
-  
-  # Screens to show (in order)
-  screens:
-    - dashboard  # Current temp, stats
-    - graph      # Rolling plot
-    - settings   # System info
-
-# Graph display options
-graph:
-  window_seconds: 60  # Show last 60 seconds
-  grid_lines: 5  # Number of horizontal grid lines
-  auto_scale: true  # Automatically scale to data range
-
-# System behavior
-system:
-  debug_mode: false
-  verbose_logging: false
-  auto_export_on_error: true
-  max_runtime_hours: 0  # 0 = unlimited
-  cpu_freq_governor: powersave  # RPi frequency scaling
-
-# Alerts (future extension)
-alerts:
-  enabled: false
-  low_temperature_celsius: 10
-  high_temperature_celsius: 40
-  timeout_seconds: 300  # No data for 5 minutes
+  retention_hours: 24
+  flush_interval_s: 1

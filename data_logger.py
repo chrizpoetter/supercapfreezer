@@ -1,54 +1,30 @@
-"""
-SUPERCAPFREEZER Data Logger
-===========================
-
-Logs temperature data to CSV file.
-Implements 24-hour rolling buffer with configurable retention.
-"""
+"""CSV logger for STM32 telemetry, ACK, and runtime events."""
 
 import csv
 import os
 from datetime import datetime, timedelta
 from collections import deque
-from typing import Optional
+from typing import Optional, Any, Dict
 
 
 class DataLogger:
-    """
-    Logs measurement data to CSV file.
-    
-    Features:
-    - CSV format with timestamp, temperature, sequence number
-    - Automatic file rotation
-    - In-memory ring buffer (24h default)
-    - Data export capabilities
-    """
+    """Logs STM32 messages and writes buffered rows to CSV."""
     
     def __init__(self, log_dir: str = "./logs", 
                  max_hours: int = 24,
                  buffer_size: Optional[int] = None):
-        """
-        Initialize logger.
-        
-        Args:
-            log_dir: Directory to store log files
-            max_hours: Hours of data to retain in memory (24h default)
-            buffer_size: Max number of records in ring buffer
-                        (if None, calculated from max_hours and 100Hz rate for measurements)
-        """
+        """Initialize logger and output CSV file."""
         self.log_dir = log_dir
         self.max_hours = max_hours
         
-        # Calculate buffer size: 24h × 3600s/h × 100Hz = 8,640,000 samples (larger for 100Hz)
+        # 10 rows/s default retention model.
         if buffer_size is None:
-            self.buffer_size = int(max_hours * 3600 * 100)
+            self.buffer_size = int(max_hours * 3600 * 10)
         else:
             self.buffer_size = buffer_size
         
-        # Ring buffers
-        self.buffer = deque(maxlen=self.buffer_size)  # Combined data
-        self.temp_buffer = deque(maxlen=int(max_hours * 3600 * 10))  # Temperature only
-        self.meas_buffer = deque(maxlen=self.buffer_size)  # Measurements only
+        self.buffer = deque(maxlen=self.buffer_size)
+        self.pending_rows = deque()
         
         # Create log directory
         if not os.path.exists(log_dir):
@@ -69,18 +45,16 @@ class DataLogger:
             self.log_file = open(filepath, 'w', newline='', buffering=1)
             self.csv_writer = csv.writer(self.log_file)
             
-            # Write header with all columns
             self.csv_writer.writerow([
                 'timestamp_utc',
                 'time_elapsed_s',
-                'temperature_celsius',
-                'pwm',
-                'setpoint_celsius',
-                'v1_volts',
-                'v2_volts',
-                'i1_amps',
-                'i2_amps',
-                'meas_state'
+                'message_type',
+                't_raw',
+                'v_volts',
+                'i_mA',
+                'state',
+                'temp_celsius',
+                'message',
             ])
             self.log_file.flush()
             
@@ -90,101 +64,92 @@ class DataLogger:
             self.log_file = None
             self.csv_writer = None
     
-    def push_temperature(self, temp: float, pwm: int, setpoint: float):
-        """
-        Log temperature data from Peltier controller.
-        
-        Args:
-            temp: Temperature in °C
-            pwm: PWM value (0-255)
-            setpoint: Target temperature in °C
-        """
+    def _push_record(self, message_type: str, payload: Dict[str, Any]) -> None:
         time_elapsed = (datetime.now() - self.start_time).total_seconds()
         timestamp_str = datetime.now().isoformat()
-        
+
         record = {
             'timestamp': timestamp_str,
             'time_elapsed': time_elapsed,
-            'temperature': temp,
-            'pwm': pwm,
-            'setpoint': setpoint,
+            'message_type': message_type,
+            't_raw': payload.get('t_raw'),
+            'v_volts': payload.get('v_volts'),
+            'i_mA': payload.get('i_mA'),
+            'state': payload.get('state'),
+            'temp_celsius': payload.get('temp_celsius'),
+            'message': payload.get('message', ''),
         }
-        
-        self.temp_buffer.append(record)
-    
-    def push_measurement(self, v1: float, v2: float, i1: float, i2: float, state: str):
-        """
-        Log measurement data from measurement controller.
-        
-        Args:
-            v1, v2: Voltages in volts
-            i1, i2: Currents in amps
-            state: State machine state (IDLE, CHARGE, DISCHARGE)
-        """
-        time_elapsed = (datetime.now() - self.start_time).total_seconds()
-        timestamp_str = datetime.now().isoformat()
-        
-        record = {
-            'timestamp': timestamp_str,
-            'time_elapsed': time_elapsed,
-            'v1': v1,
-            'v2': v2,
-            'i1': i1,
-            'i2': i2,
-            'state': state,
-        }
-        
-        self.meas_buffer.append(record)
+
+        self.buffer.append(record)
+        self.pending_rows.append(record)
+
+    def push_telemetry(
+        self,
+        t_raw: Optional[int],
+        voltage: Optional[float],
+        current_ma: Optional[float],
+        state: Optional[int],
+        temp_c: float,
+        raw_message: str,
+    ) -> None:
+        self._push_record(
+            "telemetry",
+            {
+                't_raw': t_raw,
+                'v_volts': voltage,
+                'i_mA': current_ma,
+                'state': state,
+                'temp_celsius': temp_c,
+                'message': raw_message,
+            },
+        )
+
+    def push_ack(self, ack_message: str) -> None:
+        self._push_record("ack", {'message': ack_message})
+
+    def push_event(self, event_message: str) -> None:
+        self._push_record("event", {'message': event_message})
     
     def flush_to_csv(self):
         """
-        Write buffered data to CSV (merges temp + measurement by time).
-        Call this periodically (e.g., every second) to write to disk.
+        Write all pending rows to CSV.
         """
         if not self.csv_writer:
             return
-        
-        # Get latest from each buffer
-        latest_temp = self.temp_buffer[-1] if self.temp_buffer else None
-        latest_meas = self.meas_buffer[-1] if self.meas_buffer else None
-        
-        if not latest_temp and not latest_meas:
-            return
-        
-        time_elapsed = (datetime.now() - self.start_time).total_seconds()
-        timestamp_str = datetime.now().isoformat()
-        
+
         try:
-            self.csv_writer.writerow([
-                timestamp_str,
-                f"{time_elapsed:.3f}",
-                f"{latest_temp['temperature']:.2f}" if latest_temp else "",
-                latest_temp['pwm'] if latest_temp else "",
-                f"{latest_temp['setpoint']:.2f}" if latest_temp else "",
-                f"{latest_meas['v1']:.3f}" if latest_meas else "",
-                f"{latest_meas['v2']:.3f}" if latest_meas else "",
-                f"{latest_meas['i1']:.3f}" if latest_meas else "",
-                f"{latest_meas['i2']:.3f}" if latest_meas else "",
-                latest_meas['state'] if latest_meas else "",
-            ])
-            self.log_file.flush()
+            while self.pending_rows:
+                row = self.pending_rows.popleft()
+                self.csv_writer.writerow([
+                    row['timestamp'],
+                    f"{row['time_elapsed']:.3f}",
+                    row['message_type'],
+                    row['t_raw'] if row['t_raw'] is not None else "",
+                    f"{float(row['v_volts']):.3f}" if row['v_volts'] is not None else "",
+                    f"{float(row['i_mA']):.3f}" if row['i_mA'] is not None else "",
+                    row['state'] if row['state'] is not None else "",
+                    f"{float(row['temp_celsius']):.3f}" if row['temp_celsius'] is not None else "",
+                    row['message'],
+                ])
+            if self.log_file:
+                self.log_file.flush()
         except Exception as e:
             print(f"[LOG ERROR] Failed to write: {e}")
     
     def get_recent(self, seconds: int = 60) -> list:
         """
-        Get recent temperature measurements from buffer.
+        Get recent records from buffer.
         
         Args:
             seconds: How many seconds back to retrieve
             
         Returns:
-            List of dicts with recent measurements
+            List of dicts with recent records
         """
         cutoff_time = datetime.now() - timedelta(seconds=seconds)
         result = []
         
-        for record in self.temp_buffer:
+        for record in self.buffer:
             try:
                 record_time = datetime.fromisoformat(record['timestamp'])
                 if record_time >= cutoff_time:
@@ -195,16 +160,13 @@ class DataLogger:
         return result
     
     def get_all(self) -> list:
-        """Get all buffered temperature measurements."""
-        return list(self.temp_buffer)
-    
-    def get_all_measurements(self) -> list:
-        """Get all buffered measurement data."""
-        return list(self.meas_buffer)
+        """Get all buffered records."""
+        return list(self.buffer)
     
     def get_stats(self) -> dict:
-        """Get temperature buffer statistics."""
-        if not self.temp_buffer:
+        """Get telemetry temperature statistics."""
+        temps = [r['temp_celsius'] for r in self.buffer if r.get('temp_celsius') is not None]
+        if not temps:
             return {
                 'count': 0,
                 'min_temp': None,
@@ -212,12 +174,11 @@ class DataLogger:
                 'avg_temp': None,
                 'runtime_s': 0,
             }
-        
-        temps = [r['temperature'] for r in self.temp_buffer]
+
         runtime = (datetime.now() - self.start_time).total_seconds()
         
         return {
-            'count': len(self.temp_buffer),
+            'count': len(temps),
             'min_temp': min(temps),
             'max_temp': max(temps),
             'avg_temp': sum(temps) / len(temps),

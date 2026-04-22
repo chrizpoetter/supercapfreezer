@@ -1,167 +1,320 @@
-"""
-SUPERCAPFREEZER Main Application
-================================
+"""Headless Pi app for STM32 telemetry logging and command triggering."""
 
-Integrates:
-- ASCII protocol for dual serial (Peltier + Measurement controllers)
-- Data logger to CSV (data_logger.py)
-- Pygame UI with multiple screens (ui_app.py)
+from __future__ import annotations
 
-Usage:
-    python main.py --port1 /dev/ttyACM0 --port2 /dev/ttyACM1 [--fullscreen]
-    python main.py --simulate  # Simulation mode (no hardware needed)
-"""
-
-import sys
 import argparse
-import os
-import time
+import sys
 import threading
+import time
 
-from serial_handler import PeltierController, MeasurementController
-from data_logger import DataLogger
-from ui_app import PyGameApp
 from config_loader import load_config
+from data_logger import DataLogger
+from serial_handler import STM32Controller, ArduinoTemperatureSender
 
-# Global instances
+
 g_logger = None
-g_peltier = None
-g_measurement = None
-g_setpoint = 25.0  # Default temperature setpoint
+g_controller = None
+g_arduino_sender = None
+g_arduino_decimals = 2
+g_arduino_send_interval_s = 0.5
+g_arduino_last_send_ts = 0.0
+g_trigger_temp = None
+g_trigger_direction = "below"
+g_trigger_command = "CHARGE"
+g_trigger_once = True
+g_triggered = False
 
 
-def on_temperature_packet(packet: dict):
-    """
-    Callback when temperature data is received from Peltier controller.
-    Expected format: {'TEMP': 23.45, 'PWM': 128}
-    """
-    global g_logger, g_setpoint
-    
-    if 'TEMP' in packet and 'PWM' in packet:
-        temp = packet['TEMP']
-        pwm = int(packet['PWM'])
-        
-        # Log to CSV
+def _should_trigger(temp_c: float) -> bool:
+    if g_trigger_temp is None:
+        return False
+    if g_trigger_direction == "above":
+        return temp_c >= g_trigger_temp
+    return temp_c <= g_trigger_temp
+
+
+def _runtime_command_loop() -> None:
+    """Handle runtime stdin commands for manual Arduino control."""
+    global g_arduino_sender, g_arduino_decimals, g_logger
+
+    print("[CMD] Runtime console enabled. Use: set <temp_c> (example: set 24.5)")
+    while True:
+        try:
+            line = input()
+        except EOFError:
+            break
+        except Exception:
+            continue
+
+        command = line.strip()
+        if not command:
+            continue
+
+        lower = command.lower()
+        if lower in {"help", "?"}:
+            print("[CMD] Commands: set <temp_c>, help")
+            continue
+
+        if lower.startswith("set "):
+            value_text = command[4:].strip()
+            try:
+                setpoint = float(value_text)
+            except ValueError:
+                print(f"[CMD] Invalid setpoint: {value_text}")
+                continue
+
+            if not g_arduino_sender:
+                print("[CMD] Arduino sender not configured")
+                continue
+
+            if g_arduino_sender.send_setpoint(setpoint, decimals=g_arduino_decimals):
+                print(f"[CMD] Arduino SET sent: {setpoint:.{g_arduino_decimals}f}")
+                if g_logger:
+                    g_logger.push_event(
+                        f"Arduino runtime SET sent: {setpoint:.{g_arduino_decimals}f}"
+                    )
+            else:
+                print("[CMD] Failed to send Arduino SET")
+            continue
+
+        print(f"[CMD] Unknown command: {command}")
+
+def on_stm32_status(packet: dict) -> None:
+    """Process telemetry and ACK messages from STM32."""
+    global g_logger, g_controller, g_arduino_sender, g_arduino_decimals
+    global g_arduino_send_interval_s, g_arduino_last_send_ts, g_triggered
+
+    packet_type = packet.get("type")
+
+    if packet_type == "ack":
+        ack_text = str(packet.get("ack", "ACK"))
         if g_logger:
-            g_logger.push_temperature(temp, pwm, g_setpoint)
+            g_logger.push_ack(ack_text)
+        print(f"[ACK] {ack_text}")
+        return
 
+    if packet_type != "telemetry":
+        return
 
-def on_measurement_packet(packet: dict):
-    """
-    Callback when measurement data is received from measurement controller.
-    Expected format: {'MEAS': None, 'V1': 12.34, 'V2': 5.67, 'I1': 0.123, 'I2': 0.456, 'STATE': 'CHARGE'}
-    """
-    global g_logger
-    
-    if 'V1' in packet and 'I1' in packet:
-        v1 = packet.get('V1', 0.0)
-        v2 = packet.get('V2', 0.0)
-        i1 = packet.get('I1', 0.0)
-        i2 = packet.get('I2', 0.0)
-        state = packet.get('STATE', 'IDLE')
-        
-        # Log to CSV
-        if g_logger:
-            g_logger.push_measurement(v1, v2, i1, i2, state)
+    timestamp_raw = packet.get("T")
+    voltage = packet.get("V")
+    current_ma = packet.get("I_mA")
+    state = packet.get("STATE")
+    temp_c = packet.get("Temp_C")
 
+    if temp_c is None:
+        return
 
-def main():
-    global g_logger, g_peltier, g_measurement, g_setpoint
-    
-    parser = argparse.ArgumentParser(
-        description="SUPERCAPFREEZER: Dual microcontroller controller for Raspberry Pi"
+    if g_logger:
+        g_logger.push_telemetry(
+            t_raw=timestamp_raw,
+            voltage=voltage,
+            current_ma=current_ma,
+            state=state,
+            temp_c=float(temp_c),
+            raw_message=str(packet.get("raw", "")),
+        )
+
+    voltage_text = f"{float(voltage):.3f}" if voltage is not None else "--"
+    current_text = f"{float(current_ma):.2f}" if current_ma is not None else "--"
+
+    print(
+        "[LIVE] "
+        f"T:{timestamp_raw if timestamp_raw is not None else '--'} "
+        f"V:{voltage_text} "
+        f"I:{current_text}mA "
+        f"STATE:{state if state is not None else '--'} "
+        f"Temp:{float(temp_c):.2f}C"
     )
-    parser.add_argument('--port1', help='Peltier controller port (e.g., /dev/ttyACM0)', default=None)
-    parser.add_argument('--port2', help='Measurement controller port (e.g., /dev/ttyACM1)', default=None)
-    parser.add_argument('--baud', type=int, default=None, help='Baud rate')
-    parser.add_argument('--fullscreen', action='store_true', help='Fullscreen mode')
-    parser.add_argument('--simulate', action='store_true', help='Simulate data (no hardware)')
-    parser.add_argument('--config', default='config.yaml', help='Path to config.yaml')
-    
+
+    # Forward measured temperature at a controlled interval to avoid serial spam.
+    if g_arduino_sender:
+        now = time.monotonic()
+        if (
+            g_arduino_send_interval_s <= 0.0
+            or (now - g_arduino_last_send_ts) >= g_arduino_send_interval_s
+        ):
+            if g_arduino_sender.send_temperature(float(temp_c), decimals=g_arduino_decimals):
+                g_arduino_last_send_ts = now
+
+    if g_trigger_once and g_triggered:
+        return
+
+    if _should_trigger(float(temp_c)) and g_controller:
+        if g_controller.send_command(g_trigger_command):
+            g_triggered = True
+            trigger_text = (
+                f"AUTO TRIGGER: Temp={float(temp_c):.2f}C "
+                f"({g_trigger_direction} {g_trigger_temp:.2f}C) -> CMD: {g_trigger_command}"
+            )
+            print(f"[TRIGGER] {trigger_text}")
+            if g_logger:
+                g_logger.push_event(trigger_text)
+
+
+def main() -> None:
+    global g_logger, g_controller, g_arduino_sender, g_arduino_decimals
+    global g_arduino_send_interval_s, g_arduino_last_send_ts
+    global g_trigger_temp, g_trigger_direction, g_trigger_command, g_trigger_once
+
+    parser = argparse.ArgumentParser(description="SUPERCAPFREEZER STM32 logger/controller")
+
+    parser.add_argument("--port", dest="port", default=None, help="STM32 serial port")
+    parser.add_argument("--baud", type=int, default=None, help="Serial baud")
+    parser.add_argument("--simulate", action="store_true", help="Simulate temperature input")
+    parser.add_argument("--config", default="config.yaml", help="Path to config.yaml")
+    parser.add_argument(
+        "--runtime-commands",
+        action="store_true",
+        help="Enable runtime stdin commands (set <temp_c>)",
+    )
+    parser.add_argument(
+        "--arduino-setpoint",
+        type=float,
+        default=None,
+        help="Send SET:<value> to Arduino once at startup",
+    )
+
+    parser.add_argument(
+        "--trigger-temp",
+        type=float,
+        default=None,
+        help="Automatically send test command when temperature threshold is met",
+    )
+    parser.add_argument(
+        "--trigger-direction",
+        choices=["below", "above"],
+        default=None,
+        help="Trigger when temperature goes below/above threshold",
+    )
+    parser.add_argument(
+        "--command",
+        default=None,
+        help="Command name for test start (sent as CMD: <command>)",
+    )
+    parser.add_argument(
+        "--start-test",
+        action="store_true",
+        help="Send CMD: CHARGE immediately on startup",
+    )
+    parser.add_argument(
+        "--allow-retrigger",
+        action="store_true",
+        help="Allow repeated auto-triggers instead of one-shot behavior",
+    )
+
     args = parser.parse_args()
-    
-    # Load configuration and merge CLI overrides
+
     cfg = load_config(args.config)
-    baud = args.baud if args.baud else int(cfg["serial"]["baud"])
-    port1 = args.port1 if args.port1 else cfg["serial"].get("port")
-    port2 = args.port2 if args.port2 else cfg.get("measurement", {}).get("port")
-    fullscreen = bool(args.fullscreen or cfg["display"].get("fullscreen", False))
-    g_setpoint = float(cfg.get("control", {}).get("default_setpoint", 25.0))
+
+    baud = args.baud if args.baud is not None else int(cfg.get("serial", {}).get("baud", 115200))
+    port = args.port if args.port else cfg.get("serial", {}).get("port")
+    trigger_cfg = cfg.get("trigger", {})
+    g_trigger_temp = args.trigger_temp if args.trigger_temp is not None else trigger_cfg.get("temperature_celsius")
+    if g_trigger_temp is not None:
+        g_trigger_temp = float(g_trigger_temp)
+
+    g_trigger_direction = (
+        args.trigger_direction
+        if args.trigger_direction is not None
+        else str(trigger_cfg.get("direction", "below")).lower()
+    )
+    if g_trigger_direction not in {"below", "above"}:
+        g_trigger_direction = "below"
+
+    g_trigger_command = (
+        args.command if args.command is not None else str(trigger_cfg.get("command", "CHARGE"))
+    ).strip().upper()
+
+    g_trigger_once = not args.allow_retrigger
+    if "once" in trigger_cfg and not args.allow_retrigger:
+        g_trigger_once = bool(trigger_cfg.get("once", True))
+
+    log_dir = cfg.get("logging", {}).get("directory", "./logs")
+    max_hours = int(cfg.get("logging", {}).get("retention_hours", 24))
+    flush_interval = float(cfg.get("logging", {}).get("flush_interval_s", 1.0))
+
+    arduino_cfg = cfg.get("arduino_temp", {})
+    arduino_enabled = bool(arduino_cfg.get("enabled", True))
+    arduino_port = arduino_cfg.get("port", "/dev/ttyUSB0")
+    arduino_baud = int(arduino_cfg.get("baud", 9600))
+    g_arduino_decimals = int(arduino_cfg.get("decimals", 2))
+    g_arduino_send_interval_s = float(arduino_cfg.get("send_interval_s", 0.5))
+    g_arduino_last_send_ts = 0.0
+    arduino_setpoint = (
+        args.arduino_setpoint
+        if args.arduino_setpoint is not None
+        else arduino_cfg.get("setpoint_celsius")
+    )
+    if arduino_setpoint is not None:
+        arduino_setpoint = float(arduino_setpoint)
 
     print("=" * 60)
-    print("SUPERCAPFREEZER - Dual Controller System")
+    print("SUPERCAPFREEZER - STM32 Telemetry Logger")
     print("=" * 60)
-    print(f"Peltier Port: {port1 if port1 else ('<auto>' if not args.simulate else 'Simulation')}")
-    print(f"Measurement Port: {port2 if port2 else ('<auto>' if not args.simulate else 'Simulation')}")
+    print(f"Port: {port if port else ('<auto>' if not args.simulate else 'Simulation')}")
     print(f"Baud: {baud}")
-    print(f"Setpoint: {g_setpoint}°C")
+    print(f"Auto trigger temp: {g_trigger_temp if g_trigger_temp is not None else 'disabled'}")
+    print(f"Auto trigger direction: {g_trigger_direction}")
+    print(f"Trigger command: CMD: {g_trigger_command}")
+    print(f"Trigger mode: {'one-shot' if g_trigger_once else 'retrigger'}")
+    print(
+        f"Arduino temp forward: {'enabled' if arduino_enabled else 'disabled'}"
+        f" ({arduino_port if arduino_port else 'no port'} @ {arduino_baud}, "
+        f"every {g_arduino_send_interval_s:.2f}s)"
+    )
     print("=" * 60)
-    
-    # Initialize logger
-    log_dir = cfg["logging"].get("directory", "./logs")
-    max_hours = int(cfg["logging"].get("retention_hours", 24))
+
     g_logger = DataLogger(log_dir=log_dir, max_hours=max_hours)
-    
-    # Initialize Peltier controller
-    g_peltier = PeltierController(
-        port=port1,
+
+    g_controller = STM32Controller(
+        port=port,
         baud=baud,
-        callback=on_temperature_packet,
-        simulate=args.simulate
+        on_status=on_stm32_status,
+        simulate=args.simulate,
     )
-    g_peltier.start()
-    
-    # Initialize Measurement controller
-    g_measurement = MeasurementController(
-        port=port2,
-        baud=baud,
-        callback=on_measurement_packet,
-        simulate=args.simulate
-    )
-    g_measurement.start()
-    
-    # Set initial temperature setpoint
-    time.sleep(1)  # Wait for connection
-    g_peltier.set_temperature(g_setpoint)
-    
-    # Start CSV flusher thread (write to disk every second)
-    def csv_flusher():
+    g_controller.start()
+
+    if arduino_enabled:
+        g_arduino_sender = ArduinoTemperatureSender(port=arduino_port, baud=arduino_baud)
+        g_arduino_sender.start()
+
+    time.sleep(1.0)
+    if args.start_test:
+        if g_controller.send_command("CHARGE"):
+            print("[MAIN] Startup test command sent: CMD: CHARGE")
+            if g_logger:
+                g_logger.push_event("Startup command sent: CMD: CHARGE")
+
+    def flush_loop() -> None:
         while True:
             if g_logger:
                 g_logger.flush_to_csv()
-            time.sleep(1)
-    
-    flush_thread = threading.Thread(target=csv_flusher, daemon=True)
-    flush_thread.start()
-    
-    # Initialize UI
-    ui_app = PyGameApp(port=port1, baud=baud, fullscreen=fullscreen)
-    ui_app.set_peltier(g_peltier)
-    ui_app.set_measurement(g_measurement)
-    ui_app.set_logger(g_logger)
-    
+            time.sleep(flush_interval)
+
+    threading.Thread(target=flush_loop, daemon=True).start()
+
+    runtime_commands_enabled = args.runtime_commands or sys.stdin.isatty()
+    if runtime_commands_enabled:
+        threading.Thread(target=_runtime_command_loop, daemon=True).start()
+
+    print("[MAIN] Running. Press Ctrl+C to stop.")
+
     try:
-        # Run UI
-        ui_app.run()
+        while True:
+            time.sleep(0.25)
     except KeyboardInterrupt:
         print("\n[MAIN] Interrupted by user")
-    except Exception as e:
-        print(f"[MAIN ERROR] {e}")
-        import traceback
-        traceback.print_exc()
     finally:
-        # Cleanup
         print("[MAIN] Shutting down...")
-        g_peltier.stop()
-        g_measurement.stop()
-        g_logger.close()
+        if g_controller:
+            g_controller.stop()
+        if g_arduino_sender:
+            g_arduino_sender.stop()
+        if g_logger:
+            g_logger.close()
         print("[MAIN] Goodbye!")
-        reader.stop()
-        g_logger.close()
-        ui_app.stop()
-        print("[MAIN] Done")
 
 
-if __name__ == '__main__':
-    g_logger = None
+if __name__ == "__main__":
     main()
