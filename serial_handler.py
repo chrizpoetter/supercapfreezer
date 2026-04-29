@@ -127,9 +127,7 @@ class STM32Controller:
 
         port = self.port or self._auto_detect_port()
         if not port:
-            print("[SERIAL] No serial port found, switching to simulate mode.")
-            self.connected = True
-            self._run_simulated_status()
+            print("[SERIAL] No serial port found. STM32 input disabled.")
             return
 
         try:
@@ -155,8 +153,7 @@ class STM32Controller:
 
         except Exception as exc:
             print(f"[SERIAL] Read loop failed: {exc}")
-            self.connected = True
-            self._run_simulated_status()
+            self.connected = False
 
     def _run_simulated_status(self) -> None:
         """Emit fake STM32 telemetry lines when no hardware is connected."""
