@@ -16,7 +16,7 @@ arduino_temp:
 trigger:
   # Automatic test trigger from incoming STM32 temperature.
   # Set to null to disable auto trigger.
-  temperature_celsius: -1.0
+  temperature_celsius: null
   direction: below   # below | above
   command: CHARGE
   once: true
