@@ -18,11 +18,35 @@ g_arduino_sender = None
 g_arduino_decimals = 2
 g_arduino_send_interval_s = 0.5
 g_arduino_last_send_ts = 0.0
+g_arduino_debug = False
+g_arduino_debug_last_print_ts = 0.0
+g_arduino_debug_suppressed = 0
 g_trigger_temp = None
 g_trigger_direction = "below"
 g_trigger_command = "CHARGE"
 g_trigger_once = True
 g_triggered = False
+
+
+def _on_arduino_line(line: str) -> None:
+    """Optional live debug output for lines emitted by Arduino."""
+    global g_arduino_debug_last_print_ts, g_arduino_debug_suppressed
+
+    if not g_arduino_debug:
+        return
+
+    now = time.monotonic()
+    # Keep CLI readable: print at most ~10 lines/s and summarize dropped lines.
+    if (now - g_arduino_debug_last_print_ts) < 0.1:
+        g_arduino_debug_suppressed += 1
+        return
+
+    if g_arduino_debug_suppressed > 0:
+        print(f"[ARDUINO<-] ... {g_arduino_debug_suppressed} lines suppressed")
+        g_arduino_debug_suppressed = 0
+
+    g_arduino_debug_last_print_ts = now
+    print(f"[ARDUINO<-] {line}")
 
 
 def _should_trigger(temp_c: float) -> bool:
@@ -155,6 +179,7 @@ def on_stm32_status(packet: dict) -> None:
 def main() -> None:
     global g_logger, g_controller, g_arduino_sender, g_arduino_decimals
     global g_arduino_send_interval_s, g_arduino_last_send_ts
+    global g_arduino_debug
     global g_trigger_temp, g_trigger_direction, g_trigger_command, g_trigger_once
 
     parser = argparse.ArgumentParser(description="SUPERCAPFREEZER STM32 logger/controller")
@@ -173,6 +198,11 @@ def main() -> None:
         type=float,
         default=None,
         help="Send SET:<value> to Arduino once at startup",
+    )
+    parser.add_argument(
+        "--arduino-debug",
+        action="store_true",
+        help="Print incoming Arduino serial lines for communication debugging",
     )
 
     parser.add_argument(
@@ -241,6 +271,7 @@ def main() -> None:
     g_arduino_decimals = int(arduino_cfg.get("decimals", 2))
     g_arduino_send_interval_s = float(arduino_cfg.get("send_interval_s", 0.5))
     g_arduino_last_send_ts = 0.0
+    g_arduino_debug = args.arduino_debug
     arduino_setpoint = (
         args.arduino_setpoint
         if args.arduino_setpoint is not None
@@ -263,6 +294,7 @@ def main() -> None:
         f" ({arduino_port if arduino_port else 'no port'} @ {arduino_baud}, "
         f"every {g_arduino_send_interval_s:.2f}s)"
     )
+    print(f"Arduino debug output: {'enabled' if g_arduino_debug else 'disabled'}")
     print("=" * 60)
 
     g_logger = DataLogger(log_dir=log_dir, max_hours=max_hours)
@@ -276,8 +308,24 @@ def main() -> None:
     g_controller.start()
 
     if arduino_enabled:
-        g_arduino_sender = ArduinoTemperatureSender(port=arduino_port, baud=arduino_baud)
-        g_arduino_sender.start()
+        g_arduino_sender = ArduinoTemperatureSender(
+            port=arduino_port,
+            baud=arduino_baud,
+            on_line=_on_arduino_line,
+        )
+        if g_arduino_sender.start() and arduino_setpoint is not None:
+            if g_arduino_sender.send_setpoint(arduino_setpoint, decimals=g_arduino_decimals):
+                print(
+                    "[ARDUINO] Startup SET sent: "
+                    f"{arduino_setpoint:.{g_arduino_decimals}f}"
+                )
+                if g_logger:
+                    g_logger.push_event(
+                        "Arduino startup SET sent: "
+                        f"{arduino_setpoint:.{g_arduino_decimals}f}"
+                    )
+            else:
+                print("[ARDUINO] Failed to send startup SET")
 
     time.sleep(1.0)
     if args.start_test:

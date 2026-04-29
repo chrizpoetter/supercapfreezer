@@ -38,7 +38,7 @@
 #define SAMPLE_INTERVAL_MS (1000 / SAMPLE_RATE_HZ)
 #define REPORT_INTERVAL_MS 1000           // Send status to Pi every 1 second
 #define TEMP_TIMEOUT_MS    2000           // Disable output if Pi temp updates stop
-#define TIMEOUT_ENABLED    false          // Enables timeout 
+#define TIMEOUT_ENABLED    true           // Disable output if Pi temp updates stop
 
 // Serial
 #define SERIAL_BAUD        9600
@@ -241,6 +241,12 @@ static void handle_serial_command(void) {
  * Format: "TEMP:23.45 PWM:128"
  */
 static void send_status_to_pi(float temp, uint8_t pwm) {
+    // Avoid blocking loop if host side is not draining serial fast enough.
+    // A full line is typically < 24 bytes: "TEMP:-12.34 PWM:255\r\n"
+    if (Serial.availableForWrite() < 32) {
+        return;
+    }
+
     Serial.print("TEMP:");
     Serial.print(temp, 2);
     Serial.print(" PWM:");

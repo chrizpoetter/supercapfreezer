@@ -209,11 +209,20 @@ class STM32Controller:
 class ArduinoTemperatureSender:
     """Simple serial sender for forwarding TEMP messages to Arduino."""
 
-    def __init__(self, port: Optional[str], baud: int = 9600):
+    def __init__(
+        self,
+        port: Optional[str],
+        baud: int = 9600,
+        on_line: Optional[Callable[[str], None]] = None,
+    ):
         self.port = port
         self.baud = baud
+        self.on_line = on_line
         self._serial = None
         self.connected = False
+        self._stop = threading.Event()
+        self._reader_thread: Optional[threading.Thread] = None
+        self._line_buffer = ""
 
     def start(self) -> bool:
         if not self.port:
@@ -224,6 +233,9 @@ class ArduinoTemperatureSender:
 
             self._serial = serial.Serial(self.port, self.baud, timeout=0.1)
             self.connected = True
+            self._stop.clear()
+            self._reader_thread = threading.Thread(target=self._read_loop, daemon=True)
+            self._reader_thread.start()
             print(f"[ARDUINO] Connected to {self.port} @ {self.baud}")
             return True
         except Exception as exc:
@@ -233,6 +245,7 @@ class ArduinoTemperatureSender:
             return False
 
     def stop(self) -> None:
+        self._stop.set()
         if self._serial:
             try:
                 self._serial.close()
@@ -286,3 +299,30 @@ class ArduinoTemperatureSender:
         except Exception as exc:
             print(f"[ARDUINO] Send failed: {exc}")
             return False
+
+    def _read_loop(self) -> None:
+        """Continuously drain Arduino output so device-side serial writes do not block."""
+        while not self._stop.is_set():
+            ser = self._serial
+            if not ser or not ser.is_open:
+                break
+
+            try:
+                data = ser.read(ser.in_waiting or 1)
+            except Exception:
+                break
+
+            if not data:
+                continue
+
+            chunk = data.decode("utf-8", errors="ignore")
+            self._line_buffer += chunk
+
+            while "\n" in self._line_buffer:
+                line, self._line_buffer = self._line_buffer.split("\n", 1)
+                line = line.strip()
+                if line and self.on_line:
+                    try:
+                        self.on_line(line)
+                    except Exception:
+                        pass
