@@ -37,7 +37,7 @@
 #define SAMPLE_RATE_HZ     10             // 10 Hz control update
 #define SAMPLE_INTERVAL_MS (1000 / SAMPLE_RATE_HZ)
 #define REPORT_INTERVAL_MS 1000           // Send status to Pi every 1 second
-#define TEMP_TIMEOUT_MS    2000           // Disable output if Pi temp updates stop
+#define TEMP_TIMEOUT_MS    10000          // Disable output if Pi temp updates stop
 #define TIMEOUT_ENABLED    true           // Disable output if Pi temp updates stop
 
 // Serial
