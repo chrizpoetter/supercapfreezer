@@ -46,7 +46,7 @@
 // ===== CONTROL PARAMETERS =====
 
 // On/Off Mode (CONTROL_MODE = 0)
-#define ONOFF_HYSTERESIS   0.1f           // Hysteresis band [°C]
+#define ONOFF_HYSTERESIS   0.05f           // Hysteresis band [°C]
 #define ONOFF_PWM_COLD     255            // PWM for cooling (0-255)
 #define ONOFF_PWM_OFF      0              // PWM neutral/off
 
