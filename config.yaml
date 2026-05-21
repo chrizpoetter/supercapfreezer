@@ -3,13 +3,13 @@
 serial:
   # Use /dev/serial0 for Raspberry Pi UART (Pi 3/4/5).
   # Set to null for USB auto-detection (/dev/ttyACM* or /dev/ttyUSB*).
-  port: /dev/serial0
+  port: /dev/ttyAMA0
   baud: 57600
 
 arduino_temp:
   enabled: true
   # Set to null for Arduino USB auto-detection.
-  port: null
+  port: /dev/ttyACM0
   baud: 9600
   decimals: 2
   send_interval_s: 0.5
