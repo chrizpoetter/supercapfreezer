@@ -17,13 +17,19 @@ python main.py --simulate
 ## 3. Run Hardware
 
 ```bash
-python main.py --port /dev/ttyACM0
+python main.py
+```
+
+If you use GPIO UART on Raspberry Pi, run:
+
+```bash
+python main.py --port /dev/serial0
 ```
 
 ## 4. Enable Temperature Trigger
 
 ```bash
-python main.py --port /dev/ttyACM0 --trigger-temp -1.0 --trigger-direction below --command CHARGE
+python main.py --trigger-temp -1.0 --trigger-direction below --command CHARGE
 ```
 
 ## 5. Verify Input and ACK

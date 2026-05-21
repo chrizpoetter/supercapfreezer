@@ -21,7 +21,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     },
     "arduino_temp": {
         "enabled": True,
-        "port": "/dev/ttyACM0",
+        "port": None,
         "baud": 9600,
         "decimals": 2,
         "send_interval_s": 0.5,

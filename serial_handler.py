@@ -222,21 +222,24 @@ class ArduinoTemperatureSender:
         self._line_buffer = ""
 
     def start(self) -> bool:
-        if not self.port:
+        port = self.port or self._auto_detect_port()
+        if not port:
+            print("[ARDUINO] No Arduino serial port found.")
             return False
 
         try:
             import serial
 
-            self._serial = serial.Serial(self.port, self.baud, timeout=0.1)
+            self._serial = serial.Serial(port, self.baud, timeout=0.1)
+            self.port = port
             self.connected = True
             self._stop.clear()
             self._reader_thread = threading.Thread(target=self._read_loop, daemon=True)
             self._reader_thread.start()
-            print(f"[ARDUINO] Connected to {self.port} @ {self.baud}")
+            print(f"[ARDUINO] Connected to {port} @ {self.baud}")
             return True
         except Exception as exc:
-            print(f"[ARDUINO] Connect failed on {self.port}: {exc}")
+            print(f"[ARDUINO] Connect failed on {port}: {exc}")
             self.connected = False
             self._serial = None
             return False
@@ -323,3 +326,25 @@ class ArduinoTemperatureSender:
                         self.on_line(line)
                     except Exception:
                         pass
+
+    @staticmethod
+    def _auto_detect_port() -> Optional[str]:
+        try:
+            from serial.tools import list_ports
+        except Exception:
+            return None
+
+        ports = list(list_ports.comports())
+        if not ports:
+            return None
+
+        for port in ports:
+            desc = (port.description or "").lower()
+            if "arduino" in desc or "uno" in desc or "r4" in desc:
+                return port.device
+
+        for port in ports:
+            if port.device.startswith("/dev/ttyACM") or port.device.startswith("/dev/ttyUSB"):
+                return port.device
+
+        return ports[0].device

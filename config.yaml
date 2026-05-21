@@ -1,13 +1,15 @@
 # SUPERCAPFREEZER runtime configuration
 
 serial:
-  # Set to null for auto-detection (/dev/ttyACM* or /dev/ttyUSB*)
-  port: /dev/ttyS0
+  # Use /dev/serial0 for Raspberry Pi UART (Pi 3/4/5).
+  # Set to null for USB auto-detection (/dev/ttyACM* or /dev/ttyUSB*).
+  port: /dev/serial0
   baud: 57600
 
 arduino_temp:
   enabled: true
-  port: /dev/ttyACM0
+  # Set to null for Arduino USB auto-detection.
+  port: null
   baud: 9600
   decimals: 2
   send_interval_s: 0.5

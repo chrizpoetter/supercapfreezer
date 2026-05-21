@@ -266,7 +266,7 @@ def main() -> None:
 
     arduino_cfg = cfg.get("arduino_temp", {})
     arduino_enabled = bool(arduino_cfg.get("enabled", True))
-    arduino_port = arduino_cfg.get("port", "/dev/ttyUSB0")
+    arduino_port = arduino_cfg.get("port")
     arduino_baud = int(arduino_cfg.get("baud", 9600))
     g_arduino_decimals = int(arduino_cfg.get("decimals", 2))
     g_arduino_send_interval_s = float(arduino_cfg.get("send_interval_s", 0.5))

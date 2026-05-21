@@ -6,13 +6,15 @@ StartLimitBurst=3
 
 [Service]
 Type=simple
-User=pi
-WorkingDirectory=/home/pi/supercapfreezer
-ExecStart=/home/pi/supercapfreezer/venv/bin/python main.py --port /dev/ttyACM0
+# Replace with your runtime user and install path before enabling.
+User=REPLACE_WITH_USERNAME
+WorkingDirectory=/home/REPLACE_WITH_USERNAME/supercapfreezer
+ExecStart=/home/REPLACE_WITH_USERNAME/supercapfreezer/venv/bin/python /home/REPLACE_WITH_USERNAME/supercapfreezer/main.py --config /home/REPLACE_WITH_USERNAME/supercapfreezer/config.yaml
 Restart=on-failure
 RestartSec=10
 StandardOutput=journal
 StandardError=journal
+Environment=PYTHONUNBUFFERED=1
 
 # Security: run as limited user, read-only root filesystem (if possible)
 PrivateTmp=yes

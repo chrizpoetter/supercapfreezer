@@ -1,6 +1,6 @@
 #!/bin/bash
 
-# SUPERCAPFREEZER Installation Script for Raspberry Pi 3
+# SUPERCAPFREEZER Installation Script for Raspberry Pi (Pi 3/4/5)
 # ======================================================
 # This script automates the setup of the SUPERCAPFREEZER application
 
@@ -54,7 +54,8 @@ pip install --prefer-binary -r requirements.txt
 echo -e "${GREEN}[5/6] Configuring systemd service...${NC}"
 
 # Update service file with current directory
-CURRENT_DIR=$(pwd)
+CURRENT_DIR=$(pwd -P)
+SERVICE_USER="${SUDO_USER:-$USER}"
 SERVICE_FILE="supercapfreezer_install.service"
 
 cat > "$SERVICE_FILE" << EOF
@@ -66,13 +67,14 @@ StartLimitBurst=3
 
 [Service]
 Type=simple
-User=pi
+User=${SERVICE_USER}
 WorkingDirectory=${CURRENT_DIR}
-ExecStart=${CURRENT_DIR}/venv/bin/python main.py --port /dev/ttyACM0
+ExecStart=${CURRENT_DIR}/venv/bin/python ${CURRENT_DIR}/main.py --config ${CURRENT_DIR}/config.yaml
 Restart=on-failure
 RestartSec=10
 StandardOutput=journal
 StandardError=journal
+Environment=PYTHONUNBUFFERED=1
 
 PrivateTmp=yes
 NoNewPrivileges=true
@@ -82,6 +84,11 @@ WantedBy=multi-user.target
 EOF
 
 echo "    Service file: $SERVICE_FILE"
+echo "    Service user: $SERVICE_USER"
+
+# Serial access for USB/UART devices
+sudo usermod -a -G dialout "$SERVICE_USER" || true
+
 echo "    Installing service..."
 sudo cp "$SERVICE_FILE" /etc/systemd/system/supercapfreezer.service
 sudo systemctl daemon-reload
@@ -105,7 +112,9 @@ echo ""
 echo "2. Test the application:"
 echo "   $ source venv/bin/activate"
 echo "   $ python main.py --simulate          # Simulation mode"
-echo "   $ python main.py --port /dev/ttyACM0 # With Arduino"
+echo "   $ python main.py                      # Uses config.yaml"
+echo "   $ python main.py --port /dev/serial0 # Pi UART (GPIO)"
+echo "   $ python main.py --port /dev/ttyACM0 # USB serial"
 echo ""
 echo "3. Enable autostart:"
 echo "   $ sudo systemctl start supercapfreezer"
@@ -113,6 +122,8 @@ echo "   $ sudo systemctl status supercapfreezer"
 echo ""
 echo "4. View logs:"
 echo "   $ sudo journalctl -u supercapfreezer -f"
+echo ""
+echo "5. If serial access is denied, log out/in or reboot (dialout group update)."
 echo ""
 echo "Documentation:"
 echo "   - README_NEW.md (installation & usage)"

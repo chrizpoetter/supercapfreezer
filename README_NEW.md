@@ -33,7 +33,18 @@ Edit config.yaml:
 
 ```bash
 source venv/bin/activate
-python main.py --port /dev/ttyACM0
+python main.py
+```
+
+Common serial options on Raspberry Pi:
+
+- GPIO UART (Pi 3/4/5): `/dev/serial0`
+- USB serial adapters/devices: `/dev/ttyACM0` or `/dev/ttyUSB0`
+
+Override only when needed:
+
+```bash
+python main.py --port /dev/serial0
 ```
 
 Or simulation:
@@ -68,7 +79,7 @@ sudo journalctl -u supercapfreezer -f
 ## 7. Update Workflow
 
 ```bash
-cd /home/pi/supercapfreezer
+cd /home/<your-user>/supercapfreezer
 git pull
 source venv/bin/activate
 pip install -r requirements.txt
