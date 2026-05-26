@@ -6,10 +6,9 @@ StartLimitBurst=3
 
 [Service]
 Type=simple
-# Replace with your runtime user and install path before enabling.
-User=REPLACE_WITH_USERNAME
-WorkingDirectory=/home/REPLACE_WITH_USERNAME/supercapfreezer
-ExecStart=/home/REPLACE_WITH_USERNAME/supercapfreezer/venv/bin/python /home/REPLACE_WITH_USERNAME/supercapfreezer/main.py --config /home/REPLACE_WITH_USERNAME/supercapfreezer/config.yaml
+User=ipel
+WorkingDirectory=/home/ipel/DEV/supercapfreezer
+ExecStart=/home/ipel/DEV/supercapfreezer/venv/bin/python /home/ipel/DEV/supercapfreezer/main.py --config /home/ipel/DEV/supercapfreezer/config.yaml
 Restart=on-failure
 RestartSec=10
 StandardOutput=journal
